@@ -22,5 +22,17 @@ services:
     depends_on:
       - postgres
 
+  api:
+    build:
+      context: ./apps/api
+    container_name: sdq-api
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://sdq:sdq_dev_password@postgres:5432/sdq_agents
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+
 volumes:
   sdq_postgres_data:
