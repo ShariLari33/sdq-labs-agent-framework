@@ -1,0 +1,26 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: sdq-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: sdq
+      POSTGRES_PASSWORD: sdq_dev_password
+      POSTGRES_DB: sdq_agents
+    ports:
+      - "5432:5432"
+    volumes:
+      - sdq_postgres_data:/var/lib/postgresql/data
+      - ./packages/database/init.sql:/docker-entrypoint-initdb.d/init.sql
+
+  adminer:
+    image: adminer:latest
+    container_name: sdq-adminer
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    depends_on:
+      - postgres
+
+volumes:
+  sdq_postgres_data:
