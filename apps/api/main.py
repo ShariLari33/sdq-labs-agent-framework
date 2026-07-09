@@ -27,6 +27,27 @@ class ApprovalReview(BaseModel):
     comment: str
 
 
+class MemoryCreate(BaseModel):
+    memory_type: str
+    title: str
+    body: str
+    source: str = "manual"
+    confidence: str = "medium"
+    metadata: dict = Field(default_factory=dict)
+
+
+class ImprovementCandidateCreate(BaseModel):
+    candidate_type: str
+    title: str
+    body: str
+    metadata: dict = Field(default_factory=dict)
+
+
+class ImprovementCandidateReview(BaseModel):
+    reviewed_by: str
+    review_comment: str
+
+
 def get_db_connection():
     return psycopg.connect(DATABASE_URL)
 
@@ -140,6 +161,42 @@ def resolve_approved_skills_for_agent(agent_template_id):
     ]
 
 
+def get_memory_for_tenant(tenant_id, memory_type=None):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            params = [tenant_id]
+            memory_type_filter = ""
+
+            if memory_type:
+                memory_type_filter = "AND memory_type = %s"
+                params.append(memory_type)
+
+            cur.execute(
+                f"""
+                SELECT
+                    id,
+                    tenant_id,
+                    memory_type,
+                    title,
+                    body,
+                    source,
+                    status,
+                    confidence,
+                    metadata,
+                    created_at
+                FROM memory_items
+                WHERE (tenant_id = %s OR tenant_id IS NULL)
+                  AND status = 'active'
+                  {memory_type_filter}
+                ORDER BY created_at DESC
+                """,
+                tuple(params)
+            )
+            rows = cur.fetchall()
+
+    return [serialize_memory_item(row) for row in rows]
+
+
 def serialize_task(row):
     return {
         "id": str(row[0]),
@@ -230,6 +287,39 @@ def serialize_latest_skill_version(row):
         "status": row[6],
         "content": row[7],
         "created_at": row[8].isoformat()
+    }
+
+
+def serialize_memory_item(row):
+    return {
+        "id": str(row[0]),
+        "tenant_id": str(row[1]) if row[1] else None,
+        "memory_type": row[2],
+        "title": row[3],
+        "body": row[4],
+        "source": row[5],
+        "status": row[6],
+        "confidence": row[7],
+        "metadata": row[8],
+        "created_at": row[9].isoformat(),
+    }
+
+
+def serialize_improvement_candidate(row):
+    return {
+        "id": str(row[0]),
+        "tenant_id": str(row[1]) if row[1] else None,
+        "candidate_type": row[2],
+        "title": row[3],
+        "body": row[4],
+        "source_task_id": str(row[5]) if row[5] else None,
+        "source_agent_run_id": str(row[6]) if row[6] else None,
+        "status": row[7],
+        "reviewed_by": row[8],
+        "review_comment": row[9],
+        "metadata": row[10],
+        "created_at": row[11].isoformat(),
+        "reviewed_at": row[12].isoformat() if row[12] else None,
     }
 
 @app.get("/health")
@@ -538,6 +628,333 @@ def reject_approval(approval_id: str, payload: ApprovalReview):
     }
 
 
+@app.post("/memory/global")
+def create_global_memory(payload: MemoryCreate):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO memory_items (
+                    tenant_id,
+                    memory_type,
+                    title,
+                    body,
+                    source,
+                    confidence,
+                    metadata
+                )
+                VALUES (NULL, %s, %s, %s, %s, %s, %s)
+                RETURNING id, tenant_id, memory_type, title, body, source, status, confidence, metadata, created_at
+                """,
+                (
+                    payload.memory_type,
+                    payload.title,
+                    payload.body,
+                    payload.source,
+                    payload.confidence,
+                    psycopg.types.json.Jsonb(payload.metadata),
+                )
+            )
+            memory_item = cur.fetchone()
+            conn.commit()
+
+    emit_event(
+        None,
+        "GlobalMemoryItemCreated",
+        "memory_item",
+        memory_item[0],
+        {"memory_type": payload.memory_type, "title": payload.title}
+    )
+
+    return {"memory_item": serialize_memory_item(memory_item)}
+
+
+@app.get("/memory/{tenant_slug}")
+def list_memory(tenant_slug: str, memory_type: str = None):
+    tenant = get_tenant_by_slug(tenant_slug)
+    return {"memory_items": get_memory_for_tenant(tenant["id"], memory_type)}
+
+
+@app.post("/memory/{tenant_slug}")
+def create_memory(tenant_slug: str, payload: MemoryCreate):
+    tenant = get_tenant_by_slug(tenant_slug)
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO memory_items (
+                    tenant_id,
+                    memory_type,
+                    title,
+                    body,
+                    source,
+                    confidence,
+                    metadata
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                RETURNING id, tenant_id, memory_type, title, body, source, status, confidence, metadata, created_at
+                """,
+                (
+                    tenant["id"],
+                    payload.memory_type,
+                    payload.title,
+                    payload.body,
+                    payload.source,
+                    payload.confidence,
+                    psycopg.types.json.Jsonb(payload.metadata),
+                )
+            )
+            memory_item = cur.fetchone()
+            conn.commit()
+
+    emit_event(
+        tenant["id"],
+        "MemoryItemCreated",
+        "memory_item",
+        memory_item[0],
+        {"memory_type": payload.memory_type, "title": payload.title}
+    )
+
+    return {"memory_item": serialize_memory_item(memory_item)}
+
+
+@app.post("/improvement-candidates/global")
+def create_global_improvement_candidate(payload: ImprovementCandidateCreate):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO improvement_candidates (
+                    tenant_id,
+                    candidate_type,
+                    title,
+                    body,
+                    metadata
+                )
+                VALUES (NULL, %s, %s, %s, %s)
+                RETURNING
+                    id,
+                    tenant_id,
+                    candidate_type,
+                    title,
+                    body,
+                    source_task_id,
+                    source_agent_run_id,
+                    status,
+                    reviewed_by,
+                    review_comment,
+                    metadata,
+                    created_at,
+                    reviewed_at
+                """,
+                (
+                    payload.candidate_type,
+                    payload.title,
+                    payload.body,
+                    psycopg.types.json.Jsonb(payload.metadata),
+                )
+            )
+            candidate = cur.fetchone()
+            conn.commit()
+
+    emit_event(
+        None,
+        "GlobalImprovementCandidateCreated",
+        "improvement_candidate",
+        candidate[0],
+        {"candidate_type": payload.candidate_type, "title": payload.title}
+    )
+
+    return {"improvement_candidate": serialize_improvement_candidate(candidate)}
+
+
+@app.get("/improvement-candidates/{tenant_slug}")
+def list_improvement_candidates(tenant_slug: str, candidate_type: str = None):
+    tenant = get_tenant_by_slug(tenant_slug)
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            params = [tenant["id"]]
+            candidate_type_filter = ""
+
+            if candidate_type:
+                candidate_type_filter = "AND candidate_type = %s"
+                params.append(candidate_type)
+
+            cur.execute(
+                f"""
+                SELECT
+                    id,
+                    tenant_id,
+                    candidate_type,
+                    title,
+                    body,
+                    source_task_id,
+                    source_agent_run_id,
+                    status,
+                    reviewed_by,
+                    review_comment,
+                    metadata,
+                    created_at,
+                    reviewed_at
+                FROM improvement_candidates
+                WHERE (tenant_id = %s OR tenant_id IS NULL)
+                  {candidate_type_filter}
+                ORDER BY created_at DESC
+                """,
+                tuple(params)
+            )
+            rows = cur.fetchall()
+
+    return {
+        "improvement_candidates": [
+            serialize_improvement_candidate(row) for row in rows
+        ]
+    }
+
+
+@app.post("/improvement-candidates/{tenant_slug}")
+def create_improvement_candidate(tenant_slug: str, payload: ImprovementCandidateCreate):
+    tenant = get_tenant_by_slug(tenant_slug)
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO improvement_candidates (
+                    tenant_id,
+                    candidate_type,
+                    title,
+                    body,
+                    metadata
+                )
+                VALUES (%s, %s, %s, %s, %s)
+                RETURNING
+                    id,
+                    tenant_id,
+                    candidate_type,
+                    title,
+                    body,
+                    source_task_id,
+                    source_agent_run_id,
+                    status,
+                    reviewed_by,
+                    review_comment,
+                    metadata,
+                    created_at,
+                    reviewed_at
+                """,
+                (
+                    tenant["id"],
+                    payload.candidate_type,
+                    payload.title,
+                    payload.body,
+                    psycopg.types.json.Jsonb(payload.metadata),
+                )
+            )
+            candidate = cur.fetchone()
+            conn.commit()
+
+    emit_event(
+        tenant["id"],
+        "ImprovementCandidateCreated",
+        "improvement_candidate",
+        candidate[0],
+        {"candidate_type": payload.candidate_type, "title": payload.title}
+    )
+
+    return {"improvement_candidate": serialize_improvement_candidate(candidate)}
+
+
+def review_improvement_candidate(candidate_id, payload, status):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE improvement_candidates
+                SET status = %s,
+                    reviewed_by = %s,
+                    review_comment = %s,
+                    reviewed_at = NOW()
+                WHERE id = %s
+                RETURNING
+                    id,
+                    tenant_id,
+                    candidate_type,
+                    title,
+                    body,
+                    source_task_id,
+                    source_agent_run_id,
+                    status,
+                    reviewed_by,
+                    review_comment,
+                    metadata,
+                    created_at,
+                    reviewed_at
+                """,
+                (
+                    status,
+                    payload.reviewed_by,
+                    payload.review_comment,
+                    candidate_id,
+                )
+            )
+            candidate = cur.fetchone()
+
+            if not candidate:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Improvement candidate not found"
+                )
+
+            conn.commit()
+
+    return candidate
+
+
+@app.post("/improvement-candidates/{candidate_id}/approve")
+def approve_improvement_candidate(
+    candidate_id: str,
+    payload: ImprovementCandidateReview
+):
+    candidate = review_improvement_candidate(candidate_id, payload, "approved")
+
+    emit_event(
+        candidate[1],
+        "ImprovementCandidateApproved",
+        "improvement_candidate",
+        candidate[0],
+        {
+            "reviewed_by": payload.reviewed_by,
+            "review_comment": payload.review_comment,
+        }
+    )
+
+    return {"improvement_candidate": serialize_improvement_candidate(candidate)}
+
+
+@app.post("/improvement-candidates/{candidate_id}/reject")
+def reject_improvement_candidate(
+    candidate_id: str,
+    payload: ImprovementCandidateReview
+):
+    candidate = review_improvement_candidate(candidate_id, payload, "rejected")
+
+    emit_event(
+        candidate[1],
+        "ImprovementCandidateRejected",
+        "improvement_candidate",
+        candidate[0],
+        {
+            "reviewed_by": payload.reviewed_by,
+            "review_comment": payload.review_comment,
+        }
+    )
+
+    return {"improvement_candidate": serialize_improvement_candidate(candidate)}
+
+
 @app.post("/skills/{skill_slug}/versions")
 def create_skill_version(skill_slug: str, payload: SkillVersionCreate):
     with get_db_connection() as conn:
@@ -721,12 +1138,14 @@ def run_next_task(tenant_slug: str):
             task_id = task[0]
             task_input = task[3]
             skills = resolve_approved_skills_for_agent(agent_template["id"])
+            memory = get_memory_for_tenant(tenant["id"])
             run_input = {
                 "task_id": str(task_id),
                 "task_title": task[1],
                 "task_input": task_input,
                 "agent_template": agent_template["name"],
                 "skills": skills,
+                "memory": memory,
             }
 
             cur.execute(
@@ -817,8 +1236,100 @@ def run_next_task(tenant_slug: str):
             )
             learning = cur.fetchone()
 
+            cur.execute(
+                """
+                INSERT INTO memory_items (
+                    tenant_id,
+                    memory_type,
+                    title,
+                    body,
+                    source,
+                    confidence,
+                    metadata
+                )
+                VALUES (%s, 'partner_learning', %s, %s, 'agent_run', 'medium', %s)
+                RETURNING id, tenant_id, memory_type, title, body, source, status, confidence, metadata, created_at
+                """,
+                (
+                    tenant["id"],
+                    learning_candidate["title"],
+                    learning_candidate["body"],
+                    psycopg.types.json.Jsonb(
+                        {
+                            "task_id": str(task_id),
+                            "agent_run_id": str(agent_run[0]),
+                        }
+                    ),
+                )
+            )
+            memory_item = cur.fetchone()
+
+            active_skills = [
+                {
+                    "skill_id": skill["skill_id"],
+                    "skill_version_id": skill["skill_version_id"],
+                    "slug": skill["slug"],
+                    "version": skill["version"],
+                }
+                for skill in skills
+            ]
+            cur.execute(
+                """
+                INSERT INTO improvement_candidates (
+                    tenant_id,
+                    candidate_type,
+                    title,
+                    body,
+                    source_task_id,
+                    source_agent_run_id,
+                    status,
+                    metadata
+                )
+                VALUES (%s, 'skill_improvement', %s, %s, %s, %s, 'proposed', %s)
+                RETURNING
+                    id,
+                    tenant_id,
+                    candidate_type,
+                    title,
+                    body,
+                    source_task_id,
+                    source_agent_run_id,
+                    status,
+                    reviewed_by,
+                    review_comment,
+                    metadata,
+                    created_at,
+                    reviewed_at
+                """,
+                (
+                    tenant["id"],
+                    f"Potential skill improvement from {task[1]}",
+                    "Review whether this run suggests an update to the active skill.",
+                    task_id,
+                    agent_run[0],
+                    psycopg.types.json.Jsonb(
+                        {
+                            "task_id": str(task_id),
+                            "agent_run_id": str(agent_run[0]),
+                            "active_skills": active_skills,
+                        }
+                    ),
+                )
+            )
+            improvement_candidate = cur.fetchone()
+
             conn.commit()
 
+    emit_event(
+        tenant["id"],
+        "MemoryResolved",
+        "task",
+        task_id,
+        {
+            "agent_run_id": str(agent_run[0]),
+            "memory_item_ids": [item["id"] for item in memory],
+        }
+    )
     emit_event(
         tenant["id"],
         "SkillsResolved",
@@ -865,6 +1376,28 @@ def run_next_task(tenant_slug: str):
         "learning",
         learning[0],
         {"task_id": str(task_id), "learning_candidate": learning_candidate}
+    )
+    emit_event(
+        tenant["id"],
+        "MemoryItemCreated",
+        "memory_item",
+        memory_item[0],
+        {
+            "task_id": str(task_id),
+            "agent_run_id": str(agent_run[0]),
+            "memory_type": "partner_learning",
+        }
+    )
+    emit_event(
+        tenant["id"],
+        "ImprovementCandidateCreated",
+        "improvement_candidate",
+        improvement_candidate[0],
+        {
+            "task_id": str(task_id),
+            "agent_run_id": str(agent_run[0]),
+            "candidate_type": "skill_improvement",
+        }
     )
     emit_event(
         tenant["id"],

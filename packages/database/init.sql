@@ -162,3 +162,32 @@ FROM agent_templates at
 JOIN skills s ON s.slug = 'google-ads-performance-analysis'
 WHERE at.name = 'Google Ads Performance Analyst'
 ON CONFLICT (agent_template_id, skill_id) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS memory_items (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id UUID REFERENCES tenants(id),
+  memory_type TEXT NOT NULL,
+  title TEXT NOT NULL,
+  body TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT 'manual',
+  status TEXT NOT NULL DEFAULT 'active',
+  confidence TEXT NOT NULL DEFAULT 'medium',
+  metadata JSONB NOT NULL DEFAULT '{}',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS improvement_candidates (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id UUID REFERENCES tenants(id),
+  candidate_type TEXT NOT NULL,
+  title TEXT NOT NULL,
+  body TEXT NOT NULL,
+  source_task_id UUID REFERENCES tasks(id),
+  source_agent_run_id UUID REFERENCES agent_runs(id),
+  status TEXT NOT NULL DEFAULT 'proposed',
+  reviewed_by TEXT,
+  review_comment TEXT,
+  metadata JSONB NOT NULL DEFAULT '{}',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  reviewed_at TIMESTAMPTZ
+);
