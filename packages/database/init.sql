@@ -93,3 +93,72 @@ INSERT INTO worker_registry (name, worker_type, endpoint)
 VALUES
   ('mock-performance-worker', 'mock', NULL)
 ON CONFLICT (name) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS skills (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name TEXT NOT NULL,
+  slug TEXT NOT NULL UNIQUE,
+  description TEXT,
+  status TEXT NOT NULL DEFAULT 'draft',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS skill_versions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  skill_id UUID NOT NULL REFERENCES skills(id),
+  version TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'draft',
+  content TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE(skill_id, version)
+);
+
+CREATE TABLE IF NOT EXISTS agent_template_skills (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  agent_template_id UUID NOT NULL REFERENCES agent_templates(id),
+  skill_id UUID NOT NULL REFERENCES skills(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE(agent_template_id, skill_id)
+);
+
+INSERT INTO skills (name, slug, description, status)
+VALUES (
+  'Google Ads Performance Analysis',
+  'google-ads-performance-analysis',
+  'Analyses Google Ads performance and creates optimisation recommendations.',
+  'approved'
+)
+ON CONFLICT (slug) DO NOTHING;
+
+INSERT INTO skill_versions (skill_id, version, status, content)
+SELECT
+  s.id,
+  '0.1.0',
+  'approved',
+  '# Google Ads Performance Analysis Skill
+
+## Purpose
+Analyse Google Ads performance data and identify optimisation opportunities.
+
+## Process
+1. Review spend, conversions, CPA, ROAS and conversion rate.
+2. Identify wasted spend.
+3. Identify campaigns or segments with strong performance.
+4. Recommend concrete next actions.
+5. Create a learning candidate when a reusable pattern is found.
+
+## Output
+Return summary, findings, recommendations and learning candidates.
+
+## Approval
+Human approval is required before any external change.'
+FROM skills s
+WHERE s.slug = 'google-ads-performance-analysis'
+ON CONFLICT (skill_id, version) DO NOTHING;
+
+INSERT INTO agent_template_skills (agent_template_id, skill_id)
+SELECT at.id, s.id
+FROM agent_templates at
+JOIN skills s ON s.slug = 'google-ads-performance-analysis'
+WHERE at.name = 'Google Ads Performance Analyst'
+ON CONFLICT (agent_template_id, skill_id) DO NOTHING;

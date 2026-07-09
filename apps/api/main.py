@@ -16,6 +16,12 @@ class TaskCreate(BaseModel):
     input: dict = Field(default_factory=dict)
 
 
+class SkillVersionCreate(BaseModel):
+    version: str
+    content: str
+    status: str = "draft"
+
+
 def get_db_connection():
     return psycopg.connect(DATABASE_URL)
 
@@ -88,6 +94,47 @@ def get_default_agent_template():
     }
 
 
+def resolve_approved_skills_for_agent(agent_template_id):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    s.id,
+                    s.name,
+                    s.slug,
+                    sv.version,
+                    sv.content,
+                    sv.id
+                FROM agent_template_skills ats
+                JOIN skills s ON s.id = ats.skill_id
+                JOIN LATERAL (
+                    SELECT id, version, content
+                    FROM skill_versions
+                    WHERE skill_id = s.id AND status = 'approved'
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                ) sv ON true
+                WHERE ats.agent_template_id = %s
+                ORDER BY s.name ASC
+                """,
+                (agent_template_id,)
+            )
+            rows = cur.fetchall()
+
+    return [
+        {
+            "skill_id": str(row[0]),
+            "name": row[1],
+            "slug": row[2],
+            "version": row[3],
+            "content": row[4],
+            "skill_version_id": str(row[5]),
+        }
+        for row in rows
+    ]
+
+
 def serialize_task(row):
     return {
         "id": str(row[0]),
@@ -142,6 +189,30 @@ def serialize_approval(row):
         "created_at": row[4].isoformat()
     }
 
+
+def serialize_skill_version(row):
+    return {
+        "id": str(row[0]),
+        "skill_id": str(row[1]),
+        "version": row[2],
+        "status": row[3],
+        "content": row[4],
+        "created_at": row[5].isoformat()
+    }
+
+
+def serialize_latest_skill_version(row):
+    if not row[4]:
+        return None
+
+    return {
+        "id": str(row[4]),
+        "version": row[5],
+        "status": row[6],
+        "content": row[7],
+        "created_at": row[8].isoformat()
+    }
+
 @app.get("/health")
 def health():
     return {"status": "ok", "service": "sdq-agent-framework-api"}
@@ -164,6 +235,205 @@ def get_tenants():
             for row in rows
         ]
     }
+
+
+@app.get("/skills")
+def list_skills():
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    s.id,
+                    s.name,
+                    s.slug,
+                    s.description,
+                    sv.id,
+                    sv.version,
+                    sv.status,
+                    sv.content,
+                    sv.created_at,
+                    s.status,
+                    s.created_at
+                FROM skills s
+                LEFT JOIN LATERAL (
+                    SELECT id, version, status, content, created_at
+                    FROM skill_versions
+                    WHERE skill_id = s.id AND status = 'approved'
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                ) sv ON true
+                ORDER BY s.name ASC
+                """
+            )
+            rows = cur.fetchall()
+
+    return {
+        "skills": [
+            {
+                "id": str(row[0]),
+                "name": row[1],
+                "slug": row[2],
+                "description": row[3],
+                "status": row[9],
+                "created_at": row[10].isoformat(),
+                "latest_approved_version": serialize_latest_skill_version(row),
+            }
+            for row in rows
+        ]
+    }
+
+
+@app.get("/agent-templates")
+def list_agent_templates():
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, name, description, version, created_at
+                FROM agent_templates
+                ORDER BY created_at ASC
+                """
+            )
+            template_rows = cur.fetchall()
+
+            templates = []
+            for template in template_rows:
+                cur.execute(
+                    """
+                    SELECT
+                        s.id,
+                        s.name,
+                        s.slug,
+                        s.description,
+                        sv.id,
+                        sv.version,
+                        sv.status,
+                        sv.content,
+                        sv.created_at,
+                        s.status,
+                        s.created_at
+                    FROM agent_template_skills ats
+                    JOIN skills s ON s.id = ats.skill_id
+                    LEFT JOIN LATERAL (
+                        SELECT id, version, status, content, created_at
+                        FROM skill_versions
+                        WHERE skill_id = s.id AND status = 'approved'
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                    ) sv ON true
+                    WHERE ats.agent_template_id = %s
+                    ORDER BY s.name ASC
+                    """,
+                    (template[0],)
+                )
+                skill_rows = cur.fetchall()
+
+                templates.append(
+                    {
+                        "id": str(template[0]),
+                        "name": template[1],
+                        "description": template[2],
+                        "version": template[3],
+                        "created_at": template[4].isoformat(),
+                        "skills": [
+                            {
+                                "id": str(skill[0]),
+                                "name": skill[1],
+                                "slug": skill[2],
+                                "description": skill[3],
+                                "status": skill[9],
+                                "created_at": skill[10].isoformat(),
+                                "latest_approved_version": serialize_latest_skill_version(skill),
+                            }
+                            for skill in skill_rows
+                        ],
+                    }
+                )
+
+    return {"agent_templates": templates}
+
+
+@app.post("/skills/{skill_slug}/versions")
+def create_skill_version(skill_slug: str, payload: SkillVersionCreate):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM skills WHERE slug = %s", (skill_slug,))
+            skill = cur.fetchone()
+
+            if not skill:
+                raise HTTPException(status_code=404, detail="Skill not found")
+
+            cur.execute(
+                """
+                INSERT INTO skill_versions (skill_id, version, status, content)
+                VALUES (%s, %s, %s, %s)
+                RETURNING id, skill_id, version, status, content, created_at
+                """,
+                (skill[0], payload.version, payload.status, payload.content)
+            )
+            version = cur.fetchone()
+            conn.commit()
+
+    emit_event(
+        None,
+        "SkillVersionCreated",
+        "skill_version",
+        version[0],
+        {
+            "skill_slug": skill_slug,
+            "version": payload.version,
+            "status": payload.status,
+        }
+    )
+
+    return {"skill_version": serialize_skill_version(version)}
+
+
+@app.post("/skills/{skill_slug}/versions/{version}/approve")
+def approve_skill_version(skill_slug: str, version: str):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT sv.id
+                FROM skill_versions sv
+                JOIN skills s ON s.id = sv.skill_id
+                WHERE s.slug = %s AND sv.version = %s
+                """,
+                (skill_slug, version)
+            )
+            skill_version = cur.fetchone()
+
+            if not skill_version:
+                raise HTTPException(status_code=404, detail="Skill version not found")
+
+            cur.execute(
+                """
+                UPDATE skill_versions
+                SET status = 'approved'
+                WHERE id = %s
+                RETURNING id, skill_id, version, status, content, created_at
+                """,
+                (skill_version[0],)
+            )
+            approved_version = cur.fetchone()
+            conn.commit()
+
+    emit_event(
+        None,
+        "SkillVersionApproved",
+        "skill_version",
+        approved_version[0],
+        {
+            "skill_slug": skill_slug,
+            "version": version,
+            "status": "approved",
+        }
+    )
+
+    return {"skill_version": serialize_skill_version(approved_version)}
+
 
 @app.post("/tasks")
 def create_task(payload: TaskCreate):
@@ -250,11 +520,13 @@ def run_next_task(tenant_slug: str):
 
             task_id = task[0]
             task_input = task[3]
+            skills = resolve_approved_skills_for_agent(agent_template["id"])
             run_input = {
                 "task_id": str(task_id),
                 "task_title": task[1],
                 "task_input": task_input,
                 "agent_template": agent_template["name"],
+                "skills": skills,
             }
 
             cur.execute(
@@ -347,6 +619,25 @@ def run_next_task(tenant_slug: str):
 
             conn.commit()
 
+    emit_event(
+        tenant["id"],
+        "SkillsResolved",
+        "agent_template",
+        agent_template["id"],
+        {
+            "task_id": str(task_id),
+            "agent_template_id": str(agent_template["id"]),
+            "skills": [
+                {
+                    "skill_id": skill["skill_id"],
+                    "skill_version_id": skill["skill_version_id"],
+                    "slug": skill["slug"],
+                    "version": skill["version"],
+                }
+                for skill in skills
+            ],
+        }
+    )
     emit_event(
         tenant["id"],
         "AgentRunStarted",
