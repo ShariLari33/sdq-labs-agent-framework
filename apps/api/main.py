@@ -22,6 +22,11 @@ class SkillVersionCreate(BaseModel):
     status: str = "draft"
 
 
+class ApprovalReview(BaseModel):
+    reviewed_by: str
+    comment: str
+
+
 def get_db_connection():
     return psycopg.connect(DATABASE_URL)
 
@@ -190,6 +195,20 @@ def serialize_approval(row):
     }
 
 
+def serialize_approval_detail(row):
+    return {
+        "id": str(row[0]),
+        "task_id": str(row[1]),
+        "task_title": row[2],
+        "status": row[3],
+        "requested_by": row[4],
+        "reviewed_by": row[5],
+        "comment": row[6],
+        "created_at": row[7].isoformat(),
+        "reviewed_at": row[8].isoformat() if row[8] else None,
+    }
+
+
 def serialize_skill_version(row):
     return {
         "id": str(row[0]),
@@ -354,6 +373,171 @@ def list_agent_templates():
     return {"agent_templates": templates}
 
 
+@app.get("/approvals/{tenant_slug}")
+def list_approvals(tenant_slug: str):
+    tenant = get_tenant_by_slug(tenant_slug)
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    a.id,
+                    a.task_id,
+                    t.title,
+                    a.status,
+                    a.requested_by,
+                    a.reviewed_by,
+                    a.comment,
+                    a.created_at,
+                    a.reviewed_at
+                FROM approvals a
+                JOIN tasks t ON t.id = a.task_id
+                WHERE a.tenant_id = %s AND t.tenant_id = %s
+                ORDER BY a.created_at DESC
+                """,
+                (tenant["id"], tenant["id"])
+            )
+            rows = cur.fetchall()
+
+    return {"approvals": [serialize_approval_detail(row) for row in rows]}
+
+
+def review_approval(approval_id, payload, approval_status, task_status):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT a.id, a.tenant_id, a.task_id, t.title
+                FROM approvals a
+                JOIN tasks t ON t.id = a.task_id
+                WHERE a.id = %s AND t.tenant_id = a.tenant_id
+                FOR UPDATE
+                """,
+                (approval_id,)
+            )
+            approval = cur.fetchone()
+
+            if not approval:
+                raise HTTPException(status_code=404, detail="Approval not found")
+
+            cur.execute(
+                """
+                UPDATE approvals a
+                SET status = %s,
+                    reviewed_by = %s,
+                    comment = %s,
+                    reviewed_at = NOW()
+                FROM tasks t
+                WHERE a.id = %s
+                  AND a.tenant_id = %s
+                  AND t.id = a.task_id
+                  AND t.tenant_id = a.tenant_id
+                RETURNING
+                    a.id,
+                    a.task_id,
+                    t.title,
+                    a.status,
+                    a.requested_by,
+                    a.reviewed_by,
+                    a.comment,
+                    a.created_at,
+                    a.reviewed_at
+                """,
+                (
+                    approval_status,
+                    payload.reviewed_by,
+                    payload.comment,
+                    approval[0],
+                    approval[1],
+                )
+            )
+            updated_approval = cur.fetchone()
+
+            cur.execute(
+                """
+                UPDATE tasks
+                SET status = %s
+                WHERE id = %s AND tenant_id = %s
+                RETURNING id, title, status, input, created_at
+                """,
+                (task_status, approval[2], approval[1])
+            )
+            updated_task = cur.fetchone()
+
+            conn.commit()
+
+    return approval, updated_approval, updated_task
+
+
+@app.post("/approvals/{approval_id}/approve")
+def approve_approval(approval_id: str, payload: ApprovalReview):
+    approval, updated_approval, updated_task = review_approval(
+        approval_id,
+        payload,
+        "approved",
+        "completed"
+    )
+
+    emit_event(
+        approval[1],
+        "ApprovalApproved",
+        "approval",
+        approval[0],
+        {
+            "task_id": str(approval[2]),
+            "reviewed_by": payload.reviewed_by,
+            "comment": payload.comment,
+        }
+    )
+    emit_event(
+        approval[1],
+        "TaskCompleted",
+        "task",
+        approval[2],
+        {"approval_id": str(approval[0])}
+    )
+
+    return {
+        "approval": serialize_approval_detail(updated_approval),
+        "task": serialize_task(updated_task),
+    }
+
+
+@app.post("/approvals/{approval_id}/reject")
+def reject_approval(approval_id: str, payload: ApprovalReview):
+    approval, updated_approval, updated_task = review_approval(
+        approval_id,
+        payload,
+        "rejected",
+        "revision_requested"
+    )
+
+    emit_event(
+        approval[1],
+        "ApprovalRejected",
+        "approval",
+        approval[0],
+        {
+            "task_id": str(approval[2]),
+            "reviewed_by": payload.reviewed_by,
+            "comment": payload.comment,
+        }
+    )
+    emit_event(
+        approval[1],
+        "TaskRevisionRequested",
+        "task",
+        approval[2],
+        {"approval_id": str(approval[0])}
+    )
+
+    return {
+        "approval": serialize_approval_detail(updated_approval),
+        "task": serialize_task(updated_task),
+    }
+
+
 @app.post("/skills/{skill_slug}/versions")
 def create_skill_version(skill_slug: str, payload: SkillVersionCreate):
     with get_db_connection() as conn:
@@ -363,6 +547,22 @@ def create_skill_version(skill_slug: str, payload: SkillVersionCreate):
 
             if not skill:
                 raise HTTPException(status_code=404, detail="Skill not found")
+
+            cur.execute(
+                """
+                SELECT id
+                FROM skill_versions
+                WHERE skill_id = %s AND version = %s
+                """,
+                (skill[0], payload.version)
+            )
+            existing_version = cur.fetchone()
+
+            if existing_version:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Skill version already exists"
+                )
 
             cur.execute(
                 """
