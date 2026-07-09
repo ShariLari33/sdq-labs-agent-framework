@@ -52,3 +52,44 @@ VALUES
   ('Demo Partner A', 'demo-partner-a'),
   ('Demo Partner B', 'demo-partner-b')
 ON CONFLICT (slug) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS events (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id UUID REFERENCES tenants(id),
+  event_type TEXT NOT NULL,
+  entity_type TEXT NOT NULL,
+  entity_id UUID,
+  payload JSONB NOT NULL DEFAULT '{}',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS approvals (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id UUID NOT NULL REFERENCES tenants(id),
+  task_id UUID NOT NULL REFERENCES tasks(id),
+  status TEXT NOT NULL DEFAULT 'pending',
+  requested_by TEXT,
+  reviewed_by TEXT,
+  comment TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  reviewed_at TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS worker_registry (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name TEXT NOT NULL UNIQUE,
+  worker_type TEXT NOT NULL,
+  endpoint TEXT,
+  status TEXT NOT NULL DEFAULT 'active',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+INSERT INTO agent_templates (name, description, version)
+VALUES
+  ('Google Ads Performance Analyst', 'Analyses Google Ads performance data and creates optimisation recommendations.', '0.1.0')
+ON CONFLICT DO NOTHING;
+
+INSERT INTO worker_registry (name, worker_type, endpoint)
+VALUES
+  ('mock-performance-worker', 'mock', NULL)
+ON CONFLICT (name) DO NOTHING;
