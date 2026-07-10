@@ -484,7 +484,7 @@ def plan_execution(task, tenant):
     }
 
 
-def execute_execution_tools(execution_package, tenant, task_id):
+def execute_execution_tools(execution_package, tenant, task_id, agent_run_id):
     for tool in execution_package["tools"]:
         if tool.get("name") != "google_ads_performance_reader":
             continue
@@ -494,7 +494,12 @@ def execute_execution_tools(execution_package, tenant, task_id):
             "ToolExecutionStarted",
             "task",
             task_id,
-            {"tool": tool["name"], "filters": tool.get("filters", {})},
+            {
+                "task_id": str(task_id),
+                "agent_run_id": str(agent_run_id),
+                "tool_name": tool["name"],
+                "filters": tool.get("filters", {}),
+            },
         )
         try:
             with get_db_connection() as conn:
@@ -509,9 +514,17 @@ def execute_execution_tools(execution_package, tenant, task_id):
                 "ToolExecutionFailed",
                 "task",
                 task_id,
-                {"tool": tool["name"], "error": str(exc)},
+                {
+                    "task_id": str(task_id),
+                    "agent_run_id": str(agent_run_id),
+                    "tool_name": tool["name"],
+                    "sanitised_error_type": type(exc).__name__,
+                },
             )
-            raise HTTPException(status_code=400, detail=str(exc))
+            raise HTTPException(
+                status_code=400,
+                detail="No Google Ads performance data found for the requested filters",
+            )
 
         execution_package["context"]["performance_summary"] = summary
         emit_event(
@@ -520,10 +533,14 @@ def execute_execution_tools(execution_package, tenant, task_id):
             "task",
             task_id,
             {
-                "tool": tool["name"],
+                "task_id": str(task_id),
+                "agent_run_id": str(agent_run_id),
+                "tool_name": tool["name"],
                 "import_ids": summary["data_quality"]["import_ids"],
                 "date_from": summary["period"]["date_from"],
                 "date_to": summary["period"]["date_to"],
+                "campaign_count": len(summary["campaign_breakdown"]),
+                "alert_count": len(summary["alerts"]),
             },
         )
 
@@ -2639,6 +2656,45 @@ def get_google_ads_performance_summary(
     return {"summary": summary}
 
 
+@app.get("/performance-data/{tenant_slug}/google-ads/debug-context")
+def get_google_ads_debug_context(
+    tenant_slug: str,
+    date_from: str = None,
+    date_to: str = None,
+    campaign_id: str = None,
+    campaign_status: str = None,
+):
+    tenant = get_tenant_by_slug(tenant_slug)
+    filters = {
+        "date_from": date_from,
+        "date_to": date_to,
+        "campaign_id": campaign_id,
+        "campaign_status": campaign_status,
+    }
+    with get_db_connection() as conn:
+        try:
+            summary = read_google_ads_performance(conn, tenant["id"], filters)
+        except NoPerformanceDataError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+
+    snapshot = {
+        "import_ids": summary["data_quality"]["import_ids"],
+        "date_from": summary["period"]["date_from"],
+        "date_to": summary["period"]["date_to"],
+        "totals": summary["totals"],
+        "calculated_metrics": summary["calculated_metrics"],
+        "campaign_count": len(summary["campaign_breakdown"]),
+        "alert_count": len(summary["alerts"]),
+    }
+    return {
+        "resolved_filters": filters,
+        "import_ids": summary["data_quality"]["import_ids"],
+        "performance_summary": summary,
+        "performance_snapshot": snapshot,
+        "prompt_safe": True,
+    }
+
+
 @app.post("/tasks")
 def create_task(payload: TaskCreate):
     tenant = get_tenant_by_slug(payload.tenant_slug)
@@ -2723,47 +2779,13 @@ def run_next_task(tenant_slug: str):
 
             task_id = task[0]
             execution_package = plan_execution(serialize_task(task), tenant)
-            try:
-                execution_package = execute_execution_tools(
-                    execution_package,
-                    tenant,
-                    task_id,
-                )
-            except HTTPException as exc:
-                cur.execute(
-                    """
-                    UPDATE tasks
-                    SET status = 'failed'
-                    WHERE id = %s AND tenant_id = %s
-                    RETURNING id, title, status, input, created_at
-                    """,
-                    (task_id, tenant["id"]),
-                )
-                failed_task = cur.fetchone()
-                conn.commit()
-                return {
-                    "task": serialize_task(failed_task),
-                    "error": exc.detail,
-                }
-            skills = execution_package["skills"]
-            memory = execution_package["memory"]
-            system_prompt, user_prompt = build_prompts(execution_package)
             provider = execution_package["model"]["provider"]
             model_name = execution_package["model"]["model_name"]
-            agent_run_input = {
-                **execution_package,
-                "prompt_metadata": {
-                    "system_prompt_length": len(system_prompt),
-                    "user_prompt_length": len(user_prompt),
-                    "output_format": "json",
-                },
-            }
             logs = [
                 f"provider selected: {provider}",
                 f"model selected: {model_name}",
                 "execution started",
             ]
-
             cur.execute(
                 """
                 INSERT INTO agent_runs (
@@ -2781,9 +2803,77 @@ def run_next_task(tenant_slug: str):
                     tenant["id"],
                     task_id,
                     None,
-                    psycopg.types.json.Jsonb(agent_run_input),
+                    psycopg.types.json.Jsonb(execution_package),
                     psycopg.types.json.Jsonb(logs),
                 )
+            )
+            agent_run = cur.fetchone()
+            conn.commit()
+
+            try:
+                execution_package = execute_execution_tools(
+                    execution_package,
+                    tenant,
+                    task_id,
+                    agent_run[0],
+                )
+            except HTTPException as exc:
+                logs.append("tool execution failed")
+                logs.append({"tool_error": exc.detail})
+                cur.execute(
+                    """
+                    UPDATE agent_runs
+                    SET status = 'failed', output = %s, logs = %s
+                    WHERE id = %s AND tenant_id = %s
+                    """,
+                    (
+                        psycopg.types.json.Jsonb({"error": exc.detail}),
+                        psycopg.types.json.Jsonb(logs),
+                        agent_run[0],
+                        tenant["id"],
+                    ),
+                )
+                cur.execute(
+                    """
+                    UPDATE tasks
+                    SET status = 'failed'
+                    WHERE id = %s AND tenant_id = %s
+                    RETURNING id, title, status, input, created_at
+                    """,
+                    (task_id, tenant["id"]),
+                )
+                failed_task = cur.fetchone()
+                conn.commit()
+                return {
+                    "task": serialize_task(failed_task),
+                    "agent_run_id": str(agent_run[0]),
+                    "error": exc.detail,
+                }
+
+            skills = execution_package["skills"]
+            memory = execution_package["memory"]
+            system_prompt, user_prompt = build_prompts(execution_package)
+            agent_run_input = {
+                **execution_package,
+                "prompt_metadata": {
+                    "system_prompt_length": len(system_prompt),
+                    "user_prompt_length": len(user_prompt),
+                    "output_format": "json",
+                },
+            }
+            cur.execute(
+                """
+                UPDATE agent_runs
+                SET input = %s, logs = %s
+                WHERE id = %s AND tenant_id = %s
+                RETURNING id, task_id, agent_template_id, status, input, output, logs, created_at
+                """,
+                (
+                    psycopg.types.json.Jsonb(agent_run_input),
+                    psycopg.types.json.Jsonb(logs),
+                    agent_run[0],
+                    tenant["id"],
+                ),
             )
             agent_run = cur.fetchone()
             conn.commit()
@@ -2897,6 +2987,10 @@ def run_next_task(tenant_slug: str):
                     "task_id": str(task_id),
                     "agent_run_id": str(agent_run[0]),
                     "capability": execution_package["capability"]["slug"],
+                    "task_type": execution_package["task"]["input"].get("task_type"),
+                    "performance_summary": execution_package["context"].get(
+                        "performance_summary"
+                    ),
                 },
             )
         )
@@ -2909,6 +3003,8 @@ def run_next_task(tenant_slug: str):
                 "date_to": performance_summary["period"]["date_to"],
                 "totals": performance_summary["totals"],
                 "calculated_metrics": performance_summary["calculated_metrics"],
+                "campaign_count": len(performance_summary["campaign_breakdown"]),
+                "alert_count": len(performance_summary["alerts"]),
             }
         logs.append("execution completed")
         logs.append({"llm": llm_usage_payload(llm_result)})

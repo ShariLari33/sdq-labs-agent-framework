@@ -27,6 +27,48 @@ class LLMProviderTests(unittest.TestCase):
         self.assertIn("Mock provider completed", result.text)
         self.assertEqual(result.usage.total_tokens, 0)
 
+    def test_mock_provider_grounds_performance_analysis_in_summary(self):
+        provider = MockProvider()
+        result = provider.generate(
+            LLMRequest(
+                model="mock-model-v0",
+                system_prompt="system",
+                user_prompt="user",
+                metadata={
+                    "task_type": "performance_analysis",
+                    "performance_summary": {
+                        "period": {
+                            "date_from": "2026-06-01",
+                            "date_to": "2026-06-04",
+                        },
+                        "campaign_breakdown": [
+                            {
+                                "campaign_name": "Competitor Display",
+                                "totals": {
+                                    "impressions": 187200,
+                                    "cost": 2116.45,
+                                    "conversions": 0,
+                                },
+                                "metrics": {
+                                    "ctr": 0.00383,
+                                    "cost_per_conversion": None,
+                                    "roas": 0,
+                                },
+                                "spend_share": 0.19,
+                                "conversion_share": 0,
+                            }
+                        ],
+                    },
+                },
+            )
+        )
+
+        output = normalize_llm_output(result.text)
+
+        self.assertEqual(output["findings"][0]["campaign"], "Competitor Display")
+        self.assertIn("spending without", output["findings"][0]["observation"])
+        self.assertEqual(output["recommendations"][0]["priority"], "high")
+
     def test_unknown_provider_raises_clear_error(self):
         gateway = LLMGateway(providers=[MockProvider()])
 
