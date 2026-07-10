@@ -14,6 +14,18 @@ def build_prompts(execution_package) -> tuple[str, str]:
     partner_memory = [item for item in memory if item.get("tenant_id")]
     global_memory = [item for item in memory if not item.get("tenant_id")]
 
+    performance_summary = context.get("performance_summary")
+    performance_instructions = []
+    if performance_summary:
+        performance_instructions = [
+            "Performance analysis rules:",
+            "- Deterministic metrics supplied in context are authoritative.",
+            "- Do not recalculate, invent, or extrapolate metrics.",
+            "- Cite campaign names and supplied metrics in findings.",
+            "- Distinguish observation from recommendation.",
+            "- No external change is allowed without approval.",
+        ]
+
     system_prompt = "\n\n".join(
         [
             "You are executing a capability-based marketing operations task.",
@@ -22,6 +34,7 @@ def build_prompts(execution_package) -> tuple[str, str]:
             "Partner memory (context, not guaranteed truth):\n" + _format_memory(partner_memory),
             "Global memory (context, not guaranteed truth):\n" + _format_memory(global_memory),
             "Permissions:\n" + "\n".join(f"- {item}" for item in permissions),
+            "\n".join(performance_instructions),
             "Approval rules: external changes require approval. Do not claim changes were made.",
             (
                 "Return JSON with keys: summary, findings, recommendations, "

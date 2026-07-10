@@ -1,7 +1,7 @@
 import os
 from datetime import datetime
 import psycopg
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
 from packages.ai.contracts import LLMRequest
@@ -28,8 +28,22 @@ from packages.evolution.versioning import (
 )
 from packages.execution.output_parser import normalize_llm_output
 from packages.execution.prompt_builder import build_prompts
+from packages.performance.analytics import NoPerformanceDataError, calculate_google_ads_summary
+from packages.performance.contracts import PerformanceFilters
+from packages.performance.csv_importer import (
+    DuplicateImportError,
+    import_google_ads_csv,
+)
+from packages.performance.normalizer import CsvValidationError
+from packages.performance.repository import (
+    get_google_ads_summary_data,
+    get_import_by_id,
+    get_imports_for_tenant,
+)
+from packages.tools.google_ads_performance_reader import read_google_ads_performance
 
 app = FastAPI(title="SDQ Labs Agent Framework API")
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
@@ -435,7 +449,19 @@ def plan_execution(task, tenant):
         "create_learning_candidate",
         "request_approval",
     ]
-    tools = ["mock_performance_reader"]
+    tools = []
+    if channel == "google_ads" and capability["slug"] == "performance_analysis":
+        tools.append(
+            {
+                "name": "google_ads_performance_reader",
+                "filters": {
+                    "date_from": task["input"].get("date_from"),
+                    "date_to": task["input"].get("date_to"),
+                    "campaign_id": task["input"].get("campaign_id"),
+                    "campaign_status": task["input"].get("campaign_status"),
+                },
+            }
+        )
 
     return {
         "task": task,
@@ -456,6 +482,52 @@ def plan_execution(task, tenant):
             "approval_required": capability["approval_required"],
         },
     }
+
+
+def execute_execution_tools(execution_package, tenant, task_id):
+    for tool in execution_package["tools"]:
+        if tool.get("name") != "google_ads_performance_reader":
+            continue
+
+        emit_event(
+            tenant["id"],
+            "ToolExecutionStarted",
+            "task",
+            task_id,
+            {"tool": tool["name"], "filters": tool.get("filters", {})},
+        )
+        try:
+            with get_db_connection() as conn:
+                summary = read_google_ads_performance(
+                    conn,
+                    tenant["id"],
+                    tool.get("filters", {}),
+                )
+        except NoPerformanceDataError as exc:
+            emit_event(
+                tenant["id"],
+                "ToolExecutionFailed",
+                "task",
+                task_id,
+                {"tool": tool["name"], "error": str(exc)},
+            )
+            raise HTTPException(status_code=400, detail=str(exc))
+
+        execution_package["context"]["performance_summary"] = summary
+        emit_event(
+            tenant["id"],
+            "ToolExecutionCompleted",
+            "task",
+            task_id,
+            {
+                "tool": tool["name"],
+                "import_ids": summary["data_quality"]["import_ids"],
+                "date_from": summary["period"]["date_from"],
+                "date_to": summary["period"]["date_to"],
+            },
+        )
+
+    return execution_package
 
 
 def serialize_task(row):
@@ -2463,6 +2535,110 @@ def approve_skill_version(skill_slug: str, version: str):
     return {"skill_version": serialize_skill_version(approved_version)}
 
 
+@app.post("/performance-data/{tenant_slug}/google-ads/import")
+async def import_google_ads_performance_data(
+    tenant_slug: str,
+    file: UploadFile = File(...),
+    created_by: str | None = Form(default=None),
+):
+    tenant = get_tenant_by_slug(tenant_slug)
+    file_bytes = await file.read()
+    if len(file_bytes) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="File too large")
+    if not (file.filename or "").lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Only CSV files are supported")
+
+    emit_event(
+        tenant["id"],
+        "PerformanceImportStarted",
+        "performance_import",
+        None,
+        {"channel": "google_ads", "filename": file.filename},
+    )
+    try:
+        with get_db_connection() as conn:
+            result = import_google_ads_csv(
+                conn,
+                tenant["id"],
+                file.filename,
+                file_bytes,
+                created_by,
+            )
+    except DuplicateImportError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except CsvValidationError as exc:
+        emit_event(
+            tenant["id"],
+            "PerformanceImportFailed",
+            "performance_import",
+            None,
+            {"channel": "google_ads", "error": str(exc)},
+        )
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    event_type = (
+        "PerformanceImportFailed"
+        if result.status == "failed"
+        else "PerformanceImportCompleted"
+    )
+    emit_event(
+        tenant["id"],
+        event_type,
+        "performance_import",
+        result.import_id,
+        {
+            "channel": result.channel,
+            "status": result.status,
+            "row_count": result.row_count,
+            "valid_row_count": result.valid_row_count,
+            "invalid_row_count": result.invalid_row_count,
+        },
+    )
+    return {"performance_import": result.__dict__}
+
+
+@app.get("/performance-data/{tenant_slug}/imports")
+def list_performance_imports(tenant_slug: str, channel: str = None):
+    tenant = get_tenant_by_slug(tenant_slug)
+    with get_db_connection() as conn:
+        imports = get_imports_for_tenant(conn, tenant["id"], channel)
+    return {"imports": imports}
+
+
+@app.get("/performance-data/{tenant_slug}/imports/{import_id}")
+def get_performance_import(tenant_slug: str, import_id: str):
+    tenant = get_tenant_by_slug(tenant_slug)
+    with get_db_connection() as conn:
+        performance_import = get_import_by_id(conn, tenant["id"], import_id)
+    if not performance_import:
+        raise HTTPException(status_code=404, detail="Performance import not found")
+    return {"performance_import": performance_import}
+
+
+@app.get("/performance-data/{tenant_slug}/google-ads/summary")
+def get_google_ads_performance_summary(
+    tenant_slug: str,
+    date_from: str = None,
+    date_to: str = None,
+    campaign_id: str = None,
+    campaign_status: str = None,
+):
+    tenant = get_tenant_by_slug(tenant_slug)
+    filters = PerformanceFilters(
+        date_from=date_from,
+        date_to=date_to,
+        campaign_id=campaign_id,
+        campaign_status=campaign_status,
+    )
+    with get_db_connection() as conn:
+        rows = get_google_ads_summary_data(conn, tenant["id"], filters)
+    try:
+        summary = calculate_google_ads_summary(rows, filters)
+    except NoPerformanceDataError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return {"summary": summary}
+
+
 @app.post("/tasks")
 def create_task(payload: TaskCreate):
     tenant = get_tenant_by_slug(payload.tenant_slug)
@@ -2547,6 +2723,28 @@ def run_next_task(tenant_slug: str):
 
             task_id = task[0]
             execution_package = plan_execution(serialize_task(task), tenant)
+            try:
+                execution_package = execute_execution_tools(
+                    execution_package,
+                    tenant,
+                    task_id,
+                )
+            except HTTPException as exc:
+                cur.execute(
+                    """
+                    UPDATE tasks
+                    SET status = 'failed'
+                    WHERE id = %s AND tenant_id = %s
+                    RETURNING id, title, status, input, created_at
+                    """,
+                    (task_id, tenant["id"]),
+                )
+                failed_task = cur.fetchone()
+                conn.commit()
+                return {
+                    "task": serialize_task(failed_task),
+                    "error": exc.detail,
+                }
             skills = execution_package["skills"]
             memory = execution_package["memory"]
             system_prompt, user_prompt = build_prompts(execution_package)
@@ -2703,6 +2901,15 @@ def run_next_task(tenant_slug: str):
             )
         )
         output = normalize_llm_output(llm_result.text)
+        performance_summary = execution_package["context"].get("performance_summary")
+        if performance_summary:
+            output["performance_snapshot"] = {
+                "import_ids": performance_summary["data_quality"]["import_ids"],
+                "date_from": performance_summary["period"]["date_from"],
+                "date_to": performance_summary["period"]["date_to"],
+                "totals": performance_summary["totals"],
+                "calculated_metrics": performance_summary["calculated_metrics"],
+            }
         logs.append("execution completed")
         logs.append({"llm": llm_usage_payload(llm_result)})
 

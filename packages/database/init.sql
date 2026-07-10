@@ -346,3 +346,68 @@ ALTER TABLE skill_versions
   ADD COLUMN IF NOT EXISTS source_evolution_proposal_id UUID REFERENCES evolution_proposals(id),
   ADD COLUMN IF NOT EXISTS source_improvement_candidate_id UUID REFERENCES improvement_candidates(id),
   ADD COLUMN IF NOT EXISTS change_summary TEXT;
+
+CREATE TABLE IF NOT EXISTS performance_imports (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id UUID NOT NULL REFERENCES tenants(id),
+  channel TEXT NOT NULL,
+  source_type TEXT NOT NULL DEFAULT 'csv',
+  filename TEXT NOT NULL,
+  file_sha256 TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'processing',
+  row_count INTEGER NOT NULL DEFAULT 0,
+  valid_row_count INTEGER NOT NULL DEFAULT 0,
+  invalid_row_count INTEGER NOT NULL DEFAULT 0,
+  date_from DATE,
+  date_to DATE,
+  currency TEXT,
+  mapping JSONB NOT NULL DEFAULT '{}',
+  validation_errors JSONB NOT NULL DEFAULT '[]',
+  metadata JSONB NOT NULL DEFAULT '{}',
+  created_by TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  completed_at TIMESTAMPTZ
+);
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'performance_imports_tenant_channel_sha_unique'
+  ) THEN
+    ALTER TABLE performance_imports
+      ADD CONSTRAINT performance_imports_tenant_channel_sha_unique
+      UNIQUE (tenant_id, channel, file_sha256);
+  END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS google_ads_performance_rows (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id UUID NOT NULL REFERENCES tenants(id),
+  import_id UUID NOT NULL REFERENCES performance_imports(id) ON DELETE CASCADE,
+  performance_date DATE NOT NULL,
+  campaign_id TEXT,
+  campaign_name TEXT NOT NULL,
+  campaign_status TEXT,
+  campaign_type TEXT,
+  ad_group_id TEXT,
+  ad_group_name TEXT,
+  impressions BIGINT NOT NULL DEFAULT 0,
+  clicks BIGINT NOT NULL DEFAULT 0,
+  cost NUMERIC(18,6) NOT NULL DEFAULT 0,
+  conversions NUMERIC(18,6) NOT NULL DEFAULT 0,
+  conversion_value NUMERIC(18,6) NOT NULL DEFAULT 0,
+  currency TEXT,
+  raw_data JSONB NOT NULL DEFAULT '{}',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS google_ads_rows_tenant_date_idx
+  ON google_ads_performance_rows (tenant_id, performance_date);
+
+CREATE INDEX IF NOT EXISTS google_ads_rows_tenant_campaign_idx
+  ON google_ads_performance_rows (tenant_id, campaign_id);
+
+CREATE INDEX IF NOT EXISTS google_ads_rows_import_idx
+  ON google_ads_performance_rows (import_id);
