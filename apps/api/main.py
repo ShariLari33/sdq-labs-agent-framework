@@ -3,6 +3,12 @@ import psycopg
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from packages.ai.contracts import LLMRequest
+from packages.ai.gateway import LLMGateway
+from packages.ai.providers.base import LLMProviderError
+from packages.execution.output_parser import normalize_llm_output
+from packages.execution.prompt_builder import build_prompts
+
 app = FastAPI(title="SDQ Labs Agent Framework API")
 
 DATABASE_URL = os.getenv(
@@ -46,6 +52,11 @@ class ImprovementCandidateCreate(BaseModel):
 class ImprovementCandidateReview(BaseModel):
     reviewed_by: str
     review_comment: str
+
+
+class ModelRouteUpdate(BaseModel):
+    provider: str
+    model_name: str
 
 
 def get_db_connection():
@@ -545,9 +556,46 @@ def serialize_model_route(row):
         "created_at": row[8].isoformat(),
     }
 
+
+def llm_usage_payload(result):
+    return {
+        "provider": result.provider,
+        "model": result.model,
+        "input_tokens": result.usage.input_tokens,
+        "output_tokens": result.usage.output_tokens,
+        "total_tokens": result.usage.total_tokens,
+        "latency_ms": result.latency_ms,
+        "provider_response_id": result.provider_response_id,
+    }
+
+
+def first_learning_candidate(output, task_title):
+    candidates = output.get("learning_candidates") or []
+    if candidates:
+        candidate = candidates[0]
+        if isinstance(candidate, dict):
+            return {
+                "title": candidate.get("title") or f"Learning from {task_title}",
+                "body": candidate.get("body") or str(candidate),
+            }
+        return {
+            "title": f"Learning from {task_title}",
+            "body": str(candidate),
+        }
+
+    return {
+        "title": f"Learning from {task_title}",
+        "body": "No learning candidate was returned by the provider.",
+    }
+
 @app.get("/health")
 def health():
     return {"status": "ok", "service": "sdq-agent-framework-api"}
+
+
+@app.get("/llm-providers/health")
+def llm_provider_health():
+    return LLMGateway().health()
 
 @app.get("/tenants")
 def get_tenants():
@@ -662,6 +710,52 @@ def list_capabilities():
                 capabilities.append(capability_data)
 
     return {"capabilities": capabilities}
+
+
+@app.post("/model-routes/{route_id}/activate-provider")
+def activate_model_route_provider(route_id: str, payload: ModelRouteUpdate):
+    if not payload.model_name.strip():
+        raise HTTPException(status_code=400, detail="model_name is required")
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE model_routes
+                SET provider = %s, model_name = %s
+                WHERE id = %s
+                RETURNING
+                    id,
+                    task_type,
+                    sensitivity,
+                    cost_tier,
+                    quality_tier,
+                    provider,
+                    model_name,
+                    status,
+                    created_at
+                """,
+                (payload.provider, payload.model_name, route_id)
+            )
+            route = cur.fetchone()
+            conn.commit()
+
+    if not route:
+        raise HTTPException(status_code=404, detail="Model route not found")
+
+    route_data = serialize_model_route(route)
+    emit_event(
+        None,
+        "ModelRouteUpdated",
+        "model_route",
+        route[0],
+        {
+            "provider": payload.provider,
+            "model_name": payload.model_name,
+        }
+    )
+
+    return {"model_route": route_data}
 
 
 @app.get("/execution-plan/preview/{tenant_slug}/{task_id}")
@@ -1478,6 +1572,22 @@ def run_next_task(tenant_slug: str):
             execution_package = plan_execution(serialize_task(task), tenant)
             skills = execution_package["skills"]
             memory = execution_package["memory"]
+            system_prompt, user_prompt = build_prompts(execution_package)
+            provider = execution_package["model"]["provider"]
+            model_name = execution_package["model"]["model_name"]
+            agent_run_input = {
+                **execution_package,
+                "prompt_metadata": {
+                    "system_prompt_length": len(system_prompt),
+                    "user_prompt_length": len(user_prompt),
+                    "output_format": "json",
+                },
+            }
+            logs = [
+                f"provider selected: {provider}",
+                f"model selected: {model_name}",
+                "execution started",
+            ]
 
             cur.execute(
                 """
@@ -1496,25 +1606,168 @@ def run_next_task(tenant_slug: str):
                     tenant["id"],
                     task_id,
                     None,
-                    psycopg.types.json.Jsonb(execution_package),
-                    psycopg.types.json.Jsonb(["Mock worker started"]),
+                    psycopg.types.json.Jsonb(agent_run_input),
+                    psycopg.types.json.Jsonb(logs),
                 )
             )
             agent_run = cur.fetchone()
+            conn.commit()
 
-            output = {
-                "summary": f"Mock analysis completed for: {execution_package['task']['title']}",
-                "recommendations": [
-                    "Review high-spend segments for wasted budget.",
-                    "Prioritize optimizations with clear conversion impact.",
-                ],
-                "learning_candidate": {
-                    "title": f"Learning from {execution_package['task']['title']}",
-                    "body": "Mock worker suggests saving this task pattern for future partner optimizations.",
+    emit_event(
+        tenant["id"],
+        "ExecutionPlanned",
+        "task",
+        task_id,
+        {
+            "agent_run_id": str(agent_run[0]),
+            "capability_id": execution_package["capability"]["id"],
+            "worker_id": execution_package["worker"]["id"],
+            "model": execution_package["model"],
+        }
+    )
+    emit_event(
+        tenant["id"],
+        "CapabilityResolved",
+        "capability",
+        execution_package["capability"]["id"],
+        {
+            "task_id": str(task_id),
+            "slug": execution_package["capability"]["slug"],
+        }
+    )
+    emit_event(
+        tenant["id"],
+        "WorkerResolved",
+        "worker",
+        execution_package["worker"]["id"],
+        {
+            "task_id": str(task_id),
+            "capability_id": execution_package["capability"]["id"],
+            "channel": execution_package["worker"]["channel"],
+        }
+    )
+    emit_event(
+        tenant["id"],
+        "ModelResolved",
+        "model_route",
+        execution_package["model"]["id"],
+        {
+            "task_id": str(task_id),
+            "provider": provider,
+            "model_name": model_name,
+        }
+    )
+    emit_event(
+        tenant["id"],
+        "PermissionsResolved",
+        "task",
+        task_id,
+        {
+            "agent_run_id": str(agent_run[0]),
+            "permissions": execution_package["permissions"],
+            "tools": execution_package["tools"],
+        }
+    )
+    emit_event(
+        tenant["id"],
+        "MemoryResolved",
+        "task",
+        task_id,
+        {
+            "agent_run_id": str(agent_run[0]),
+            "memory_item_ids": [item["id"] for item in memory],
+        }
+    )
+    emit_event(
+        tenant["id"],
+        "SkillsResolved",
+        "capability",
+        execution_package["capability"]["id"],
+        {
+            "task_id": str(task_id),
+            "capability_id": execution_package["capability"]["id"],
+            "skills": [
+                {
+                    "skill_id": skill["skill_id"],
+                    "skill_version_id": skill["skill_version_id"],
+                    "slug": skill["slug"],
+                    "version": skill["version"],
+                }
+                for skill in skills
+            ],
+        }
+    )
+    emit_event(
+        tenant["id"],
+        "LLMExecutionStarted",
+        "agent_run",
+        agent_run[0],
+        {
+            "task_id": str(task_id),
+            "agent_run_id": str(agent_run[0]),
+            "provider": provider,
+            "model": model_name,
+        }
+    )
+
+    llm_result = None
+    try:
+        llm_result = LLMGateway().generate(
+            provider,
+            LLMRequest(
+                model=model_name,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                metadata={
+                    "task_id": str(task_id),
+                    "agent_run_id": str(agent_run[0]),
+                    "capability": execution_package["capability"]["slug"],
                 },
-                "approval_required": True,
-            }
+            )
+        )
+        output = normalize_llm_output(llm_result.text)
+        logs.append("execution completed")
+        logs.append({"llm": llm_usage_payload(llm_result)})
 
+        emit_event(
+            tenant["id"],
+            "LLMExecutionCompleted",
+            "agent_run",
+            agent_run[0],
+            {
+                "task_id": str(task_id),
+                "agent_run_id": str(agent_run[0]),
+                "provider": provider,
+                "model": model_name,
+                "usage": {
+                    "input_tokens": llm_result.usage.input_tokens,
+                    "output_tokens": llm_result.usage.output_tokens,
+                    "total_tokens": llm_result.usage.total_tokens,
+                },
+                "latency_ms": llm_result.latency_ms,
+            }
+        )
+    except LLMProviderError as exc:
+        error_type = type(exc).__name__
+        output = normalize_llm_output(f"LLM execution failed: {error_type}")
+        logs.append("execution failed")
+        logs.append({"llm_error_type": error_type})
+        emit_event(
+            tenant["id"],
+            "LLMExecutionFailed",
+            "agent_run",
+            agent_run[0],
+            {
+                "task_id": str(task_id),
+                "agent_run_id": str(agent_run[0]),
+                "provider": provider,
+                "model": model_name,
+                "error_type": error_type,
+            }
+        )
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
             cur.execute(
                 """
                 UPDATE agent_runs
@@ -1524,7 +1777,7 @@ def run_next_task(tenant_slug: str):
                 """,
                 (
                     psycopg.types.json.Jsonb(output),
-                    psycopg.types.json.Jsonb(["Mock worker started", "Mock worker completed"]),
+                    psycopg.types.json.Jsonb(logs),
                     agent_run[0],
                     tenant["id"],
                 )
@@ -1552,7 +1805,10 @@ def run_next_task(tenant_slug: str):
             )
             approval = cur.fetchone()
 
-            learning_candidate = output["learning_candidate"]
+            learning_candidate = first_learning_candidate(
+                output,
+                execution_package["task"]["title"]
+            )
             cur.execute(
                 """
                 INSERT INTO learnings (tenant_id, scope, title, body, confidence)
@@ -1651,90 +1907,6 @@ def run_next_task(tenant_slug: str):
 
             conn.commit()
 
-    emit_event(
-        tenant["id"],
-        "ExecutionPlanned",
-        "task",
-        task_id,
-        {
-            "agent_run_id": str(agent_run[0]),
-            "capability_id": execution_package["capability"]["id"],
-            "worker_id": execution_package["worker"]["id"],
-            "model": execution_package["model"],
-        }
-    )
-    emit_event(
-        tenant["id"],
-        "CapabilityResolved",
-        "capability",
-        execution_package["capability"]["id"],
-        {
-            "task_id": str(task_id),
-            "slug": execution_package["capability"]["slug"],
-        }
-    )
-    emit_event(
-        tenant["id"],
-        "WorkerResolved",
-        "worker",
-        execution_package["worker"]["id"],
-        {
-            "task_id": str(task_id),
-            "capability_id": execution_package["capability"]["id"],
-            "channel": execution_package["worker"]["channel"],
-        }
-    )
-    emit_event(
-        tenant["id"],
-        "ModelResolved",
-        "model_route",
-        execution_package["model"]["id"],
-        {
-            "task_id": str(task_id),
-            "provider": execution_package["model"]["provider"],
-            "model_name": execution_package["model"]["model_name"],
-        }
-    )
-    emit_event(
-        tenant["id"],
-        "PermissionsResolved",
-        "task",
-        task_id,
-        {
-            "agent_run_id": str(agent_run[0]),
-            "permissions": execution_package["permissions"],
-            "tools": execution_package["tools"],
-        }
-    )
-    emit_event(
-        tenant["id"],
-        "MemoryResolved",
-        "task",
-        task_id,
-        {
-            "agent_run_id": str(agent_run[0]),
-            "memory_item_ids": [item["id"] for item in memory],
-        }
-    )
-    emit_event(
-        tenant["id"],
-        "SkillsResolved",
-        "capability",
-        execution_package["capability"]["id"],
-        {
-            "task_id": str(task_id),
-            "capability_id": execution_package["capability"]["id"],
-            "skills": [
-                {
-                    "skill_id": skill["skill_id"],
-                    "skill_version_id": skill["skill_version_id"],
-                    "slug": skill["slug"],
-                    "version": skill["version"],
-                }
-                for skill in skills
-            ],
-        }
-    )
     emit_event(
         tenant["id"],
         "AgentRunStarted",
