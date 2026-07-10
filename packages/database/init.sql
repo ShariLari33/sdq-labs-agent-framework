@@ -288,3 +288,61 @@ WHERE NOT EXISTS (
     AND provider = 'mock'
     AND model_name = 'mock-model-v0'
 );
+
+CREATE TABLE IF NOT EXISTS performance_feedback (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id UUID NOT NULL REFERENCES tenants(id),
+  task_id UUID REFERENCES tasks(id),
+  agent_run_id UUID REFERENCES agent_runs(id),
+  metric_name TEXT NOT NULL,
+  metric_value NUMERIC,
+  metric_unit TEXT,
+  period_start TIMESTAMPTZ,
+  period_end TIMESTAMPTZ,
+  baseline_value NUMERIC,
+  metadata JSONB NOT NULL DEFAULT '{}',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS candidate_evidence (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  improvement_candidate_id UUID NOT NULL REFERENCES improvement_candidates(id),
+  evidence_type TEXT NOT NULL,
+  source_id UUID,
+  description TEXT,
+  weight NUMERIC NOT NULL DEFAULT 1,
+  metadata JSONB NOT NULL DEFAULT '{}',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS candidate_evaluations (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  improvement_candidate_id UUID NOT NULL REFERENCES improvement_candidates(id),
+  evaluator_type TEXT NOT NULL,
+  score NUMERIC,
+  verdict TEXT NOT NULL,
+  rationale TEXT,
+  metadata JSONB NOT NULL DEFAULT '{}',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS evolution_proposals (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  improvement_candidate_id UUID NOT NULL REFERENCES improvement_candidates(id),
+  proposal_type TEXT NOT NULL,
+  target_skill_id UUID REFERENCES skills(id),
+  base_skill_version_id UUID REFERENCES skill_versions(id),
+  proposed_version TEXT,
+  proposed_content TEXT,
+  status TEXT NOT NULL DEFAULT 'draft',
+  created_by TEXT NOT NULL DEFAULT 'evolution-engine',
+  approved_by TEXT,
+  approval_comment TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  approved_at TIMESTAMPTZ
+);
+
+ALTER TABLE skill_versions
+  ADD COLUMN IF NOT EXISTS source_evolution_proposal_id UUID REFERENCES evolution_proposals(id),
+  ADD COLUMN IF NOT EXISTS source_improvement_candidate_id UUID REFERENCES improvement_candidates(id),
+  ADD COLUMN IF NOT EXISTS change_summary TEXT;

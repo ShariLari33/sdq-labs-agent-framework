@@ -1,4 +1,5 @@
 import os
+from datetime import datetime
 import psycopg
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -6,6 +7,25 @@ from pydantic import BaseModel, Field
 from packages.ai.contracts import LLMRequest
 from packages.ai.gateway import LLMGateway
 from packages.ai.providers.base import LLMProviderError
+from packages.evolution.engine import analyse_candidate
+from packages.evolution.proposal_builder import (
+    ProposalBuilderConflictError,
+    build_skill_proposal,
+)
+from packages.evolution.versioning import (
+    build_repair_preview,
+    get_latest_skill_version,
+    next_minor_version,
+    parse_semantic_version,
+    ProposalNotFoundError,
+    RejectedProposalError,
+    skill_integrity_report,
+    SkillVersionContentConflictError,
+    TargetSkillNotFoundError,
+    approve_proposal as approve_evolution_proposal,
+    reject_proposal as reject_evolution_proposal,
+    restore_skill_version as restore_skill_version_status,
+)
 from packages.execution.output_parser import normalize_llm_output
 from packages.execution.prompt_builder import build_prompts
 
@@ -57,6 +77,39 @@ class ImprovementCandidateReview(BaseModel):
 class ModelRouteUpdate(BaseModel):
     provider: str
     model_name: str
+
+
+class PerformanceFeedbackCreate(BaseModel):
+    task_id: str | None = None
+    agent_run_id: str | None = None
+    metric_name: str
+    metric_value: float | None = None
+    metric_unit: str | None = None
+    period_start: datetime | None = None
+    period_end: datetime | None = None
+    baseline_value: float | None = None
+    metadata: dict = Field(default_factory=dict)
+
+
+class CandidateEvidenceCreate(BaseModel):
+    evidence_type: str
+    source_id: str | None = None
+    description: str | None = None
+    weight: float = 1
+    metadata: dict = Field(default_factory=dict)
+
+
+class CandidateEvaluationCreate(BaseModel):
+    evaluator_type: str
+    score: float | None = None
+    verdict: str
+    rationale: str | None = None
+    metadata: dict = Field(default_factory=dict)
+
+
+class EvolutionProposalReview(BaseModel):
+    reviewed_by: str
+    comment: str
 
 
 def get_db_connection():
@@ -554,6 +607,92 @@ def serialize_model_route(row):
         "model_name": row[6],
         "status": row[7],
         "created_at": row[8].isoformat(),
+    }
+
+
+def serialize_performance_feedback(row):
+    return {
+        "id": str(row[0]),
+        "tenant_id": str(row[1]),
+        "task_id": str(row[2]) if row[2] else None,
+        "agent_run_id": str(row[3]) if row[3] else None,
+        "metric_name": row[4],
+        "metric_value": float(row[5]) if row[5] is not None else None,
+        "metric_unit": row[6],
+        "period_start": row[7].isoformat() if row[7] else None,
+        "period_end": row[8].isoformat() if row[8] else None,
+        "baseline_value": float(row[9]) if row[9] is not None else None,
+        "metadata": row[10],
+        "created_at": row[11].isoformat(),
+    }
+
+
+def serialize_candidate_evidence(row):
+    return {
+        "id": str(row[0]),
+        "improvement_candidate_id": str(row[1]),
+        "evidence_type": row[2],
+        "source_id": str(row[3]) if row[3] else None,
+        "description": row[4],
+        "weight": float(row[5]),
+        "metadata": row[6],
+        "created_at": row[7].isoformat(),
+    }
+
+
+def serialize_candidate_evaluation(row):
+    return {
+        "id": str(row[0]),
+        "improvement_candidate_id": str(row[1]),
+        "evaluator_type": row[2],
+        "score": float(row[3]) if row[3] is not None else None,
+        "verdict": row[4],
+        "rationale": row[5],
+        "metadata": row[6],
+        "created_at": row[7].isoformat(),
+    }
+
+
+def serialize_evolution_proposal(row):
+    return {
+        "id": str(row[0]),
+        "improvement_candidate_id": str(row[1]),
+        "proposal_type": row[2],
+        "target_skill_id": str(row[3]) if row[3] else None,
+        "base_skill_version_id": str(row[4]) if row[4] else None,
+        "proposed_version": row[5],
+        "proposed_content": row[6],
+        "status": row[7],
+        "created_by": row[8],
+        "approved_by": row[9],
+        "approval_comment": row[10],
+        "created_at": row[11].isoformat(),
+        "approved_at": row[12].isoformat() if row[12] else None,
+    }
+
+
+def get_candidate_context(candidate_id):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, tenant_id, candidate_type, status, source_agent_run_id
+                FROM improvement_candidates
+                WHERE id = %s
+                """,
+                (candidate_id,)
+            )
+            candidate = cur.fetchone()
+
+    if not candidate:
+        raise HTTPException(status_code=404, detail="Improvement candidate not found")
+
+    return {
+        "id": candidate[0],
+        "tenant_id": candidate[1],
+        "candidate_type": candidate[2],
+        "status": candidate[3],
+        "source_agent_run_id": candidate[4],
     }
 
 
@@ -1389,6 +1528,844 @@ def reject_improvement_candidate(
     return {"improvement_candidate": serialize_improvement_candidate(candidate)}
 
 
+@app.post("/performance-feedback/{tenant_slug}")
+def create_performance_feedback(
+    tenant_slug: str,
+    payload: PerformanceFeedbackCreate
+):
+    tenant = get_tenant_by_slug(tenant_slug)
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO performance_feedback (
+                    tenant_id,
+                    task_id,
+                    agent_run_id,
+                    metric_name,
+                    metric_value,
+                    metric_unit,
+                    period_start,
+                    period_end,
+                    baseline_value,
+                    metadata
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING
+                    id,
+                    tenant_id,
+                    task_id,
+                    agent_run_id,
+                    metric_name,
+                    metric_value,
+                    metric_unit,
+                    period_start,
+                    period_end,
+                    baseline_value,
+                    metadata,
+                    created_at
+                """,
+                (
+                    tenant["id"],
+                    payload.task_id,
+                    payload.agent_run_id,
+                    payload.metric_name,
+                    payload.metric_value,
+                    payload.metric_unit,
+                    payload.period_start,
+                    payload.period_end,
+                    payload.baseline_value,
+                    psycopg.types.json.Jsonb(payload.metadata),
+                )
+            )
+            feedback = cur.fetchone()
+            linked_evidence = []
+
+            if payload.agent_run_id:
+                cur.execute(
+                    """
+                    SELECT id
+                    FROM improvement_candidates
+                    WHERE tenant_id = %s
+                      AND source_agent_run_id = %s
+                      AND status = 'proposed'
+                    """,
+                    (tenant["id"], payload.agent_run_id)
+                )
+                candidates = cur.fetchall()
+                for candidate in candidates:
+                    change_text = "no baseline"
+                    if (
+                        payload.metric_value is not None
+                        and payload.baseline_value is not None
+                    ):
+                        change_text = str(payload.metric_value - payload.baseline_value)
+
+                    cur.execute(
+                        """
+                        INSERT INTO candidate_evidence (
+                            improvement_candidate_id,
+                            evidence_type,
+                            source_id,
+                            description,
+                            metadata
+                        )
+                        VALUES (%s, 'performance_metric', %s, %s, %s)
+                        RETURNING
+                            id,
+                            improvement_candidate_id,
+                            evidence_type,
+                            source_id,
+                            description,
+                            weight,
+                            metadata,
+                            created_at
+                        """,
+                        (
+                            candidate[0],
+                            feedback[0],
+                            (
+                                f"{payload.metric_name}={payload.metric_value} "
+                                f"{payload.metric_unit or ''}; change from baseline: {change_text}"
+                            ),
+                            psycopg.types.json.Jsonb(
+                                {
+                                    "metric_name": payload.metric_name,
+                                    "metric_value": payload.metric_value,
+                                    "metric_unit": payload.metric_unit,
+                                    "baseline_value": payload.baseline_value,
+                                    "period_start": payload.period_start.isoformat()
+                                    if payload.period_start else None,
+                                    "period_end": payload.period_end.isoformat()
+                                    if payload.period_end else None,
+                                }
+                            ),
+                        )
+                    )
+                    linked_evidence.append(cur.fetchone())
+
+            conn.commit()
+
+    emit_event(
+        tenant["id"],
+        "PerformanceFeedbackCreated",
+        "performance_feedback",
+        feedback[0],
+        {"metric_name": payload.metric_name, "agent_run_id": payload.agent_run_id}
+    )
+    for evidence in linked_evidence:
+        emit_event(
+            tenant["id"],
+            "CandidateEvidenceAdded",
+            "candidate_evidence",
+            evidence[0],
+            {
+                "improvement_candidate_id": str(evidence[1]),
+                "evidence_type": evidence[2],
+                "source_id": str(evidence[3]) if evidence[3] else None,
+            }
+        )
+
+    return {
+        "performance_feedback": serialize_performance_feedback(feedback),
+        "linked_evidence": [
+            serialize_candidate_evidence(evidence) for evidence in linked_evidence
+        ],
+    }
+
+
+@app.get("/performance-feedback/{tenant_slug}")
+def list_performance_feedback(
+    tenant_slug: str,
+    metric_name: str = None,
+    task_id: str = None,
+    agent_run_id: str = None
+):
+    tenant = get_tenant_by_slug(tenant_slug)
+    filters = []
+    params = [tenant["id"]]
+
+    if metric_name:
+        filters.append("metric_name = %s")
+        params.append(metric_name)
+    if task_id:
+        filters.append("task_id = %s")
+        params.append(task_id)
+    if agent_run_id:
+        filters.append("agent_run_id = %s")
+        params.append(agent_run_id)
+
+    where_filters = ""
+    if filters:
+        where_filters = "AND " + " AND ".join(filters)
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT
+                    id,
+                    tenant_id,
+                    task_id,
+                    agent_run_id,
+                    metric_name,
+                    metric_value,
+                    metric_unit,
+                    period_start,
+                    period_end,
+                    baseline_value,
+                    metadata,
+                    created_at
+                FROM performance_feedback
+                WHERE tenant_id = %s
+                  {where_filters}
+                ORDER BY created_at DESC
+                """,
+                tuple(params)
+            )
+            rows = cur.fetchall()
+
+    return {
+        "performance_feedback": [
+            serialize_performance_feedback(row) for row in rows
+        ]
+    }
+
+
+@app.post("/improvement-candidates/{candidate_id}/evidence")
+def add_candidate_evidence(candidate_id: str, payload: CandidateEvidenceCreate):
+    candidate = get_candidate_context(candidate_id)
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO candidate_evidence (
+                    improvement_candidate_id,
+                    evidence_type,
+                    source_id,
+                    description,
+                    weight,
+                    metadata
+                )
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING
+                    id,
+                    improvement_candidate_id,
+                    evidence_type,
+                    source_id,
+                    description,
+                    weight,
+                    metadata,
+                    created_at
+                """,
+                (
+                    candidate["id"],
+                    payload.evidence_type,
+                    payload.source_id,
+                    payload.description,
+                    payload.weight,
+                    psycopg.types.json.Jsonb(payload.metadata),
+                )
+            )
+            evidence = cur.fetchone()
+            conn.commit()
+
+    emit_event(
+        candidate["tenant_id"],
+        "CandidateEvidenceAdded",
+        "candidate_evidence",
+        evidence[0],
+        {
+            "improvement_candidate_id": str(candidate["id"]),
+            "evidence_type": payload.evidence_type,
+            "source_id": payload.source_id,
+        }
+    )
+
+    return {"evidence": serialize_candidate_evidence(evidence)}
+
+
+@app.get("/improvement-candidates/{candidate_id}/evidence")
+def list_candidate_evidence(candidate_id: str):
+    get_candidate_context(candidate_id)
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    id,
+                    improvement_candidate_id,
+                    evidence_type,
+                    source_id,
+                    description,
+                    weight,
+                    metadata,
+                    created_at
+                FROM candidate_evidence
+                WHERE improvement_candidate_id = %s
+                ORDER BY created_at DESC
+                """,
+                (candidate_id,)
+            )
+            rows = cur.fetchall()
+
+    return {"evidence": [serialize_candidate_evidence(row) for row in rows]}
+
+
+@app.post("/improvement-candidates/{candidate_id}/evaluations")
+def add_candidate_evaluation(candidate_id: str, payload: CandidateEvaluationCreate):
+    if payload.verdict not in {"support", "reject", "inconclusive"}:
+        raise HTTPException(status_code=400, detail="Invalid verdict")
+
+    candidate = get_candidate_context(candidate_id)
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO candidate_evaluations (
+                    improvement_candidate_id,
+                    evaluator_type,
+                    score,
+                    verdict,
+                    rationale,
+                    metadata
+                )
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING
+                    id,
+                    improvement_candidate_id,
+                    evaluator_type,
+                    score,
+                    verdict,
+                    rationale,
+                    metadata,
+                    created_at
+                """,
+                (
+                    candidate["id"],
+                    payload.evaluator_type,
+                    payload.score,
+                    payload.verdict,
+                    payload.rationale,
+                    psycopg.types.json.Jsonb(payload.metadata),
+                )
+            )
+            evaluation = cur.fetchone()
+            conn.commit()
+
+    emit_event(
+        candidate["tenant_id"],
+        "CandidateEvaluated",
+        "candidate_evaluation",
+        evaluation[0],
+        {
+            "improvement_candidate_id": str(candidate["id"]),
+            "verdict": payload.verdict,
+            "score": payload.score,
+        }
+    )
+
+    return {"evaluation": serialize_candidate_evaluation(evaluation)}
+
+
+@app.get("/improvement-candidates/{candidate_id}/evaluations")
+def list_candidate_evaluations(candidate_id: str):
+    get_candidate_context(candidate_id)
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    id,
+                    improvement_candidate_id,
+                    evaluator_type,
+                    score,
+                    verdict,
+                    rationale,
+                    metadata,
+                    created_at
+                FROM candidate_evaluations
+                WHERE improvement_candidate_id = %s
+                ORDER BY created_at DESC
+                """,
+                (candidate_id,)
+            )
+            rows = cur.fetchall()
+
+    return {"evaluations": [serialize_candidate_evaluation(row) for row in rows]}
+
+
+@app.post("/evolution/analyse/{candidate_id}")
+def analyse_evolution_candidate(candidate_id: str):
+    candidate = get_candidate_context(candidate_id)
+    try:
+        analysis = analyse_candidate(candidate_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    emit_event(
+        candidate["tenant_id"],
+        "EvolutionCandidateAnalysed",
+        "improvement_candidate",
+        candidate["id"],
+        {
+            "recommendation": analysis["recommendation"],
+            "evidence_score": analysis["evidence_score"],
+            "supporting_evidence_count": analysis["supporting_evidence_count"],
+        }
+    )
+
+    return {"analysis": analysis}
+
+
+@app.post(
+    "/evolution/proposals/from-candidate/{candidate_id}",
+    summary="Create an evolution proposal with an automatically generated version",
+)
+def create_evolution_proposal(candidate_id: str):
+    candidate = get_candidate_context(candidate_id)
+    try:
+        proposal = build_skill_proposal(candidate_id)
+    except ProposalBuilderConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    created = proposal.pop("_created", True)
+    if created:
+        emit_event(
+            candidate["tenant_id"],
+            "EvolutionProposalCreated",
+            "evolution_proposal",
+            proposal["id"],
+            {
+                "improvement_candidate_id": str(candidate["id"]),
+                "target_skill_id": proposal["target_skill_id"],
+                "proposed_version": proposal["proposed_version"],
+            }
+        )
+
+    return {"evolution_proposal": proposal}
+
+
+@app.get("/evolution/proposals")
+def list_evolution_proposals(status: str = None, target_skill_id: str = None):
+    filters = []
+    params = []
+    if status:
+        filters.append("status = %s")
+        params.append(status)
+    if target_skill_id:
+        filters.append("target_skill_id = %s")
+        params.append(target_skill_id)
+
+    where_clause = ""
+    if filters:
+        where_clause = "WHERE " + " AND ".join(filters)
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT
+                    id,
+                    improvement_candidate_id,
+                    proposal_type,
+                    target_skill_id,
+                    base_skill_version_id,
+                    proposed_version,
+                    proposed_content,
+                    status,
+                    created_by,
+                    approved_by,
+                    approval_comment,
+                    created_at,
+                    approved_at
+                FROM evolution_proposals
+                {where_clause}
+                ORDER BY created_at DESC
+                """,
+                tuple(params)
+            )
+            rows = cur.fetchall()
+
+    return {
+        "evolution_proposals": [
+            serialize_evolution_proposal(row) for row in rows
+        ]
+    }
+
+
+@app.get("/evolution/proposals/{proposal_id}")
+def get_evolution_proposal(proposal_id: str):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    id,
+                    improvement_candidate_id,
+                    proposal_type,
+                    target_skill_id,
+                    base_skill_version_id,
+                    proposed_version,
+                    proposed_content,
+                    status,
+                    created_by,
+                    approved_by,
+                    approval_comment,
+                    created_at,
+                    approved_at
+                FROM evolution_proposals
+                WHERE id = %s
+                """,
+                (proposal_id,)
+            )
+            proposal = cur.fetchone()
+
+            if not proposal:
+                raise HTTPException(status_code=404, detail="Evolution proposal not found")
+
+            proposal_data = serialize_evolution_proposal(proposal)
+            cur.execute(
+                """
+                SELECT
+                    id,
+                    tenant_id,
+                    candidate_type,
+                    title,
+                    body,
+                    source_task_id,
+                    source_agent_run_id,
+                    status,
+                    reviewed_by,
+                    review_comment,
+                    metadata,
+                    created_at,
+                    reviewed_at
+                FROM improvement_candidates
+                WHERE id = %s
+                """,
+                (proposal[1],)
+            )
+            candidate = cur.fetchone()
+            cur.execute(
+                """
+                SELECT
+                    id,
+                    improvement_candidate_id,
+                    evidence_type,
+                    source_id,
+                    description,
+                    weight,
+                    metadata,
+                    created_at
+                FROM candidate_evidence
+                WHERE improvement_candidate_id = %s
+                ORDER BY created_at DESC
+                """,
+                (proposal[1],)
+            )
+            evidence = cur.fetchall()
+            cur.execute(
+                """
+                SELECT
+                    id,
+                    improvement_candidate_id,
+                    evaluator_type,
+                    score,
+                    verdict,
+                    rationale,
+                    metadata,
+                    created_at
+                FROM candidate_evaluations
+                WHERE improvement_candidate_id = %s
+                ORDER BY created_at DESC
+                """,
+                (proposal[1],)
+            )
+            evaluations = cur.fetchall()
+
+    return {
+        "evolution_proposal": proposal_data,
+        "candidate": serialize_improvement_candidate(candidate),
+        "evidence": [serialize_candidate_evidence(row) for row in evidence],
+        "evaluations": [
+            serialize_candidate_evaluation(row) for row in evaluations
+        ],
+    }
+
+
+@app.post("/evolution/proposals/{proposal_id}/approve")
+def approve_evolution_proposal_endpoint(
+    proposal_id: str,
+    payload: EvolutionProposalReview
+):
+    try:
+        proposal, skill_version = approve_evolution_proposal(
+            proposal_id,
+            payload.reviewed_by,
+            payload.comment,
+        )
+    except (ProposalNotFoundError, TargetSkillNotFoundError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except SkillVersionContentConflictError:
+        raise HTTPException(
+            status_code=409,
+            detail="Skill version already exists with different content",
+        )
+    except RejectedProposalError:
+        raise HTTPException(
+            status_code=409,
+            detail="Rejected proposal cannot be approved",
+        )
+
+    return {
+        "evolution_proposal": proposal,
+        "skill_version": skill_version,
+    }
+
+
+@app.post("/evolution/proposals/{proposal_id}/reject")
+def reject_evolution_proposal_endpoint(
+    proposal_id: str,
+    payload: EvolutionProposalReview
+):
+    try:
+        proposal = reject_evolution_proposal(
+            proposal_id,
+            payload.reviewed_by,
+            payload.comment,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    candidate = get_candidate_context(proposal["improvement_candidate_id"])
+    emit_event(
+        candidate["tenant_id"],
+        "EvolutionProposalRejected",
+        "evolution_proposal",
+        proposal["id"],
+        {
+            "target_skill_id": proposal["target_skill_id"],
+            "reviewed_by": payload.reviewed_by,
+        }
+    )
+
+    return {"evolution_proposal": proposal}
+
+
+@app.post("/skills/{skill_slug}/versions/{version}/restore")
+def restore_skill_version(
+    skill_slug: str,
+    version: str,
+    payload: EvolutionProposalReview
+):
+    try:
+        restored = restore_skill_version_status(skill_slug, version)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    emit_event(
+        None,
+        "SkillVersionRestored",
+        "skill_version",
+        restored["id"],
+        {
+            "skill_slug": skill_slug,
+            "version": version,
+            "reviewed_by": payload.reviewed_by,
+            "comment": payload.comment,
+        }
+    )
+
+    return {"skill_version": restored}
+
+
+def get_skill_with_versions(skill_slug: str):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, name, slug
+                FROM skills
+                WHERE slug = %s
+                """,
+                (skill_slug,),
+            )
+            skill = cur.fetchone()
+            if not skill:
+                raise HTTPException(status_code=404, detail="Skill not found")
+
+            cur.execute(
+                """
+                SELECT id, skill_id, version, status, content, created_at
+                FROM skill_versions
+                WHERE skill_id = %s
+                """,
+                (skill[0],),
+            )
+            versions = cur.fetchall()
+
+    return skill, versions
+
+
+def get_approved_skill_version(skill_slug: str):
+    skill, versions = get_skill_with_versions(skill_slug)
+    approved_versions = [version for version in versions if version[3] == "approved"]
+    if not approved_versions:
+        raise HTTPException(status_code=404, detail="Approved skill version not found")
+
+    approved = max(approved_versions, key=lambda row: parse_semantic_version(row[2]))
+    return skill, approved
+
+
+def next_available_skill_version(conn, skill_id):
+    latest = get_latest_skill_version(conn, skill_id)
+    if not latest:
+        raise HTTPException(status_code=404, detail="Skill version not found")
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT version
+            FROM skill_versions
+            WHERE skill_id = %s
+            """,
+            (skill_id,),
+        )
+        existing_versions = {row[0] for row in cur.fetchall()}
+
+    next_version = next_minor_version(latest[2])
+    while next_version in existing_versions:
+        next_version = next_minor_version(next_version)
+    return next_version
+
+
+@app.get("/skills/{skill_slug}/integrity")
+def get_skill_integrity(skill_slug: str):
+    skill, approved = get_approved_skill_version(skill_slug)
+    report = skill_integrity_report(approved[4])
+    return {
+        "skill_slug": skill[2],
+        "approved_version": approved[2],
+        **report,
+    }
+
+
+@app.post("/skills/{skill_slug}/repair-preview")
+def preview_skill_repair(skill_slug: str):
+    skill, approved = get_approved_skill_version(skill_slug)
+    preview = build_repair_preview(approved[4])
+    return {
+        "skill_slug": skill[2],
+        "before": {
+            "version": approved[2],
+            "improvement_section_count": preview["before"]["improvement_section_count"],
+            "healthy": preview["before"]["healthy"],
+            "issues": preview["before"]["issues"],
+        },
+        "after": {
+            "improvement_section_count": preview["after"]["improvement_section_count"],
+            "healthy": preview["after"]["healthy"],
+            "issues": preview["after"]["issues"],
+            "content": preview["after"]["content"],
+        },
+        "changes": preview["changes"],
+    }
+
+
+@app.post("/skills/{skill_slug}/repair")
+def repair_skill(skill_slug: str, payload: EvolutionProposalReview):
+    skill, approved = get_approved_skill_version(skill_slug)
+    preview = build_repair_preview(approved[4])
+    if preview["before"]["healthy"]:
+        raise HTTPException(status_code=409, detail="No repair needed")
+    if not preview["after"]["healthy"]:
+        raise HTTPException(status_code=409, detail="Repair preview is still unhealthy")
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            new_version = next_available_skill_version(conn, skill[0])
+            cur.execute(
+                """
+                UPDATE skill_versions
+                SET status = 'superseded'
+                WHERE skill_id = %s AND status = 'approved'
+                """,
+                (skill[0],),
+            )
+            cur.execute(
+                """
+                INSERT INTO skill_versions (
+                    skill_id,
+                    version,
+                    status,
+                    content,
+                    change_summary
+                )
+                VALUES (%s, %s, 'approved', %s, %s)
+                RETURNING id, skill_id, version, status, content, created_at
+                """,
+                (
+                    skill[0],
+                    new_version,
+                    preview["after"]["content"],
+                    payload.comment,
+                ),
+            )
+            repaired = cur.fetchone()
+            conn.commit()
+
+    emit_event(
+        None,
+        "SkillIntegrityRepairCreated",
+        "skill_version",
+        repaired[0],
+        {
+            "skill_slug": skill_slug,
+            "from_version": approved[2],
+            "to_version": repaired[2],
+            "reviewed_by": payload.reviewed_by,
+            "comment": payload.comment,
+        },
+    )
+    emit_event(
+        None,
+        "SkillVersionCreated",
+        "skill_version",
+        repaired[0],
+        {
+            "skill_slug": skill_slug,
+            "version": repaired[2],
+            "status": "approved",
+        },
+    )
+    emit_event(
+        None,
+        "SkillVersionApproved",
+        "skill_version",
+        repaired[0],
+        {
+            "skill_slug": skill_slug,
+            "version": repaired[2],
+        },
+    )
+
+    return {
+        "skill_version": serialize_skill_version(repaired),
+        "repair": {
+            "from_version": approved[2],
+            "to_version": repaired[2],
+            "changes": preview["changes"],
+        },
+    }
+
+
 @app.post("/skills/{skill_slug}/versions")
 def create_skill_version(skill_slug: str, payload: SkillVersionCreate):
     with get_db_connection() as conn:
@@ -1851,59 +2828,95 @@ def run_next_task(tenant_slug: str):
             )
             memory_item = cur.fetchone()
 
-            active_skills = [
-                {
-                    "skill_id": skill["skill_id"],
-                    "skill_version_id": skill["skill_version_id"],
-                    "slug": skill["slug"],
-                    "version": skill["version"],
-                }
-                for skill in skills
-            ]
-            cur.execute(
-                """
-                INSERT INTO improvement_candidates (
-                    tenant_id,
-                    candidate_type,
-                    title,
-                    body,
-                    source_task_id,
-                    source_agent_run_id,
-                    status,
-                    metadata
+            improvement_candidate = None
+            candidate_evidence = None
+            if output.get("learning_candidates"):
+                active_skills = [
+                    {
+                        "skill_id": skill["skill_id"],
+                        "skill_version_id": skill["skill_version_id"],
+                        "slug": skill["slug"],
+                        "version": skill["version"],
+                    }
+                    for skill in skills
+                ]
+                cur.execute(
+                    """
+                    INSERT INTO improvement_candidates (
+                        tenant_id,
+                        candidate_type,
+                        title,
+                        body,
+                        source_task_id,
+                        source_agent_run_id,
+                        status,
+                        metadata
+                    )
+                    VALUES (%s, 'skill_improvement', %s, %s, %s, %s, 'proposed', %s)
+                    RETURNING
+                        id,
+                        tenant_id,
+                        candidate_type,
+                        title,
+                        body,
+                        source_task_id,
+                        source_agent_run_id,
+                        status,
+                        reviewed_by,
+                        review_comment,
+                        metadata,
+                        created_at,
+                        reviewed_at
+                    """,
+                    (
+                        tenant["id"],
+                        f"Potential skill improvement from {execution_package['task']['title']}",
+                        "Review whether this run suggests an update to the active skill.",
+                        task_id,
+                        agent_run[0],
+                        psycopg.types.json.Jsonb(
+                            {
+                                "task_id": str(task_id),
+                                "agent_run_id": str(agent_run[0]),
+                                "active_skills": active_skills,
+                            }
+                        ),
+                    )
                 )
-                VALUES (%s, 'skill_improvement', %s, %s, %s, %s, 'proposed', %s)
-                RETURNING
-                    id,
-                    tenant_id,
-                    candidate_type,
-                    title,
-                    body,
-                    source_task_id,
-                    source_agent_run_id,
-                    status,
-                    reviewed_by,
-                    review_comment,
-                    metadata,
-                    created_at,
-                    reviewed_at
-                """,
-                (
-                    tenant["id"],
-                    f"Potential skill improvement from {execution_package['task']['title']}",
-                    "Review whether this run suggests an update to the active skill.",
-                    task_id,
-                    agent_run[0],
-                    psycopg.types.json.Jsonb(
-                        {
-                            "task_id": str(task_id),
-                            "agent_run_id": str(agent_run[0]),
-                            "active_skills": active_skills,
-                        }
-                    ),
+                improvement_candidate = cur.fetchone()
+                cur.execute(
+                    """
+                    INSERT INTO candidate_evidence (
+                        improvement_candidate_id,
+                        evidence_type,
+                        source_id,
+                        description,
+                        metadata
+                    )
+                    VALUES (%s, 'agent_run', %s, %s, %s)
+                    RETURNING
+                        id,
+                        improvement_candidate_id,
+                        evidence_type,
+                        source_id,
+                        description,
+                        weight,
+                        metadata,
+                        created_at
+                    """,
+                    (
+                        improvement_candidate[0],
+                        agent_run[0],
+                        learning_candidate["body"],
+                        psycopg.types.json.Jsonb(
+                            {
+                                "task_id": str(task_id),
+                                "agent_run_id": str(agent_run[0]),
+                            }
+                        ),
+                    )
                 )
-            )
-            improvement_candidate = cur.fetchone()
+                candidate_evidence = cur.fetchone()
 
             conn.commit()
 
@@ -1950,17 +2963,30 @@ def run_next_task(tenant_slug: str):
             "memory_type": "partner_learning",
         }
     )
-    emit_event(
-        tenant["id"],
-        "ImprovementCandidateCreated",
-        "improvement_candidate",
-        improvement_candidate[0],
-        {
-            "task_id": str(task_id),
-            "agent_run_id": str(agent_run[0]),
-            "candidate_type": "skill_improvement",
-        }
-    )
+    if improvement_candidate:
+        emit_event(
+            tenant["id"],
+            "ImprovementCandidateCreated",
+            "improvement_candidate",
+            improvement_candidate[0],
+            {
+                "task_id": str(task_id),
+                "agent_run_id": str(agent_run[0]),
+                "candidate_type": "skill_improvement",
+            }
+        )
+    if candidate_evidence:
+        emit_event(
+            tenant["id"],
+            "CandidateEvidenceAdded",
+            "candidate_evidence",
+            candidate_evidence[0],
+            {
+                "improvement_candidate_id": str(candidate_evidence[1]),
+                "evidence_type": "agent_run",
+                "source_id": str(candidate_evidence[3]),
+            }
+        )
     emit_event(
         tenant["id"],
         "TaskNeedsReview",
