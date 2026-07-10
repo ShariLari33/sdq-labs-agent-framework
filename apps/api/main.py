@@ -197,6 +197,203 @@ def get_memory_for_tenant(tenant_id, memory_type=None):
     return [serialize_memory_item(row) for row in rows]
 
 
+def resolve_capability_for_task(task_input):
+    channel = task_input.get("channel")
+    slug = "performance_analysis"
+
+    if channel == "google_ads":
+        slug = "performance_analysis"
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    id,
+                    slug,
+                    name,
+                    description,
+                    default_model_tier,
+                    approval_required,
+                    created_at
+                FROM capabilities
+                WHERE slug = %s
+                """,
+                (slug,)
+            )
+            capability = cur.fetchone()
+
+    if not capability:
+        raise HTTPException(status_code=500, detail="Capability not found")
+
+    return serialize_capability(capability)
+
+
+def resolve_worker_for_capability(capability_id, channel):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    w.id,
+                    w.name,
+                    w.worker_type,
+                    w.endpoint,
+                    w.status,
+                    cw.channel,
+                    cw.priority
+                FROM capability_workers cw
+                JOIN worker_registry w ON w.id = cw.worker_id
+                WHERE cw.capability_id = %s
+                  AND cw.status = 'active'
+                  AND w.status = 'active'
+                  AND (cw.channel = %s OR cw.channel IS NULL)
+                ORDER BY cw.priority ASC, cw.created_at ASC
+                LIMIT 1
+                """,
+                (capability_id, channel)
+            )
+            worker = cur.fetchone()
+
+    if not worker:
+        raise HTTPException(status_code=500, detail="No active worker for capability")
+
+    return {
+        "id": str(worker[0]),
+        "name": worker[1],
+        "worker_type": worker[2],
+        "endpoint": worker[3],
+        "status": worker[4],
+        "channel": worker[5],
+        "priority": worker[6],
+    }
+
+
+def resolve_model_route(
+    task_type,
+    sensitivity="internal",
+    cost_tier="low",
+    quality_tier="standard"
+):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    id,
+                    task_type,
+                    sensitivity,
+                    cost_tier,
+                    quality_tier,
+                    provider,
+                    model_name,
+                    status,
+                    created_at
+                FROM model_routes
+                WHERE task_type = %s
+                  AND sensitivity = %s
+                  AND cost_tier = %s
+                  AND quality_tier = %s
+                  AND status = 'active'
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (task_type, sensitivity, cost_tier, quality_tier)
+            )
+            route = cur.fetchone()
+
+    if not route:
+        return {
+            "id": None,
+            "task_type": task_type,
+            "sensitivity": sensitivity,
+            "cost_tier": cost_tier,
+            "quality_tier": quality_tier,
+            "provider": "mock",
+            "model_name": "mock-model-v0",
+            "status": "fallback",
+        }
+
+    return serialize_model_route(route)
+
+
+def resolve_approved_skills_for_capability(capability_id):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    s.id,
+                    s.name,
+                    s.slug,
+                    sv.version,
+                    sv.content,
+                    sv.id
+                FROM capability_skills cs
+                JOIN skills s ON s.id = cs.skill_id
+                JOIN LATERAL (
+                    SELECT id, version, content
+                    FROM skill_versions
+                    WHERE skill_id = s.id AND status = 'approved'
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                ) sv ON true
+                WHERE cs.capability_id = %s
+                ORDER BY s.name ASC
+                """,
+                (capability_id,)
+            )
+            rows = cur.fetchall()
+
+    return [
+        {
+            "skill_id": str(row[0]),
+            "name": row[1],
+            "slug": row[2],
+            "version": row[3],
+            "content": row[4],
+            "skill_version_id": str(row[5]),
+        }
+        for row in rows
+    ]
+
+
+def plan_execution(task, tenant):
+    capability = resolve_capability_for_task(task["input"])
+    channel = task["input"].get("channel")
+    worker = resolve_worker_for_capability(capability["id"], channel)
+    skills = resolve_approved_skills_for_capability(capability["id"])
+    memory = get_memory_for_tenant(tenant["id"])
+    model = resolve_model_route(capability["slug"])
+    permissions = [
+        "read_performance_data",
+        "create_recommendations",
+        "create_learning_candidate",
+        "request_approval",
+    ]
+    tools = ["mock_performance_reader"]
+
+    return {
+        "task": task,
+        "tenant": {
+            "id": str(tenant["id"]),
+            "name": tenant["name"],
+            "slug": tenant["slug"],
+        },
+        "capability": capability,
+        "worker": worker,
+        "model": model,
+        "skills": skills,
+        "memory": memory,
+        "permissions": permissions,
+        "tools": tools,
+        "context": {
+            "channel": channel,
+            "approval_required": capability["approval_required"],
+        },
+    }
+
+
 def serialize_task(row):
     return {
         "id": str(row[0]),
@@ -322,6 +519,32 @@ def serialize_improvement_candidate(row):
         "reviewed_at": row[12].isoformat() if row[12] else None,
     }
 
+
+def serialize_capability(row):
+    return {
+        "id": str(row[0]),
+        "slug": row[1],
+        "name": row[2],
+        "description": row[3],
+        "default_model_tier": row[4],
+        "approval_required": row[5],
+        "created_at": row[6].isoformat(),
+    }
+
+
+def serialize_model_route(row):
+    return {
+        "id": str(row[0]),
+        "task_type": row[1],
+        "sensitivity": row[2],
+        "cost_tier": row[3],
+        "quality_tier": row[4],
+        "provider": row[5],
+        "model_name": row[6],
+        "status": row[7],
+        "created_at": row[8].isoformat(),
+    }
+
 @app.get("/health")
 def health():
     return {"status": "ok", "service": "sdq-agent-framework-api"}
@@ -344,6 +567,123 @@ def get_tenants():
             for row in rows
         ]
     }
+
+
+@app.get("/capabilities")
+def list_capabilities():
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    id,
+                    slug,
+                    name,
+                    description,
+                    default_model_tier,
+                    approval_required,
+                    created_at
+                FROM capabilities
+                ORDER BY created_at ASC
+                """
+            )
+            capability_rows = cur.fetchall()
+
+            capabilities = []
+            for capability in capability_rows:
+                cur.execute(
+                    """
+                    SELECT
+                        w.id,
+                        w.name,
+                        w.worker_type,
+                        w.endpoint,
+                        w.status,
+                        cw.channel,
+                        cw.priority
+                    FROM capability_workers cw
+                    JOIN worker_registry w ON w.id = cw.worker_id
+                    WHERE cw.capability_id = %s
+                    ORDER BY cw.priority ASC, cw.created_at ASC
+                    """,
+                    (capability[0],)
+                )
+                worker_rows = cur.fetchall()
+
+                cur.execute(
+                    """
+                    SELECT
+                        s.id,
+                        s.name,
+                        s.slug,
+                        sv.version,
+                        sv.content,
+                        sv.id
+                    FROM capability_skills cs
+                    JOIN skills s ON s.id = cs.skill_id
+                    LEFT JOIN LATERAL (
+                        SELECT id, version, content
+                        FROM skill_versions
+                        WHERE skill_id = s.id AND status = 'approved'
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                    ) sv ON true
+                    WHERE cs.capability_id = %s
+                    ORDER BY s.name ASC
+                    """,
+                    (capability[0],)
+                )
+                skill_rows = cur.fetchall()
+
+                capability_data = serialize_capability(capability)
+                capability_data["workers"] = [
+                    {
+                        "id": str(worker[0]),
+                        "name": worker[1],
+                        "worker_type": worker[2],
+                        "endpoint": worker[3],
+                        "status": worker[4],
+                        "channel": worker[5],
+                        "priority": worker[6],
+                    }
+                    for worker in worker_rows
+                ]
+                capability_data["skills"] = [
+                    {
+                        "skill_id": str(skill[0]),
+                        "name": skill[1],
+                        "slug": skill[2],
+                        "version": skill[3],
+                        "content": skill[4],
+                        "skill_version_id": str(skill[5]) if skill[5] else None,
+                    }
+                    for skill in skill_rows
+                ]
+                capabilities.append(capability_data)
+
+    return {"capabilities": capabilities}
+
+
+@app.get("/execution-plan/preview/{tenant_slug}/{task_id}")
+def preview_execution_plan(tenant_slug: str, task_id: str):
+    tenant = get_tenant_by_slug(tenant_slug)
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, title, status, input, created_at
+                FROM tasks
+                WHERE id = %s AND tenant_id = %s
+                """,
+                (task_id, tenant["id"])
+            )
+            task = cur.fetchone()
+
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    return {"execution_plan": plan_execution(serialize_task(task), tenant)}
 
 
 @app.get("/skills")
@@ -1114,7 +1454,6 @@ def list_tasks(tenant_slug: str):
 @app.post("/task-engine/run-next/{tenant_slug}")
 def run_next_task(tenant_slug: str):
     tenant = get_tenant_by_slug(tenant_slug)
-    agent_template = get_default_agent_template()
 
     with get_db_connection() as conn:
         with conn.cursor() as cur:
@@ -1136,17 +1475,9 @@ def run_next_task(tenant_slug: str):
                 return {"message": "No queued tasks"}
 
             task_id = task[0]
-            task_input = task[3]
-            skills = resolve_approved_skills_for_agent(agent_template["id"])
-            memory = get_memory_for_tenant(tenant["id"])
-            run_input = {
-                "task_id": str(task_id),
-                "task_title": task[1],
-                "task_input": task_input,
-                "agent_template": agent_template["name"],
-                "skills": skills,
-                "memory": memory,
-            }
+            execution_package = plan_execution(serialize_task(task), tenant)
+            skills = execution_package["skills"]
+            memory = execution_package["memory"]
 
             cur.execute(
                 """
@@ -1164,21 +1495,21 @@ def run_next_task(tenant_slug: str):
                 (
                     tenant["id"],
                     task_id,
-                    agent_template["id"],
-                    psycopg.types.json.Jsonb(run_input),
+                    None,
+                    psycopg.types.json.Jsonb(execution_package),
                     psycopg.types.json.Jsonb(["Mock worker started"]),
                 )
             )
             agent_run = cur.fetchone()
 
             output = {
-                "summary": f"Mock analysis completed for: {task[1]}",
+                "summary": f"Mock analysis completed for: {execution_package['task']['title']}",
                 "recommendations": [
                     "Review high-spend segments for wasted budget.",
                     "Prioritize optimizations with clear conversion impact.",
                 ],
                 "learning_candidate": {
-                    "title": f"Learning from {task[1]}",
+                    "title": f"Learning from {execution_package['task']['title']}",
                     "body": "Mock worker suggests saving this task pattern for future partner optimizations.",
                 },
                 "approval_required": True,
@@ -1303,7 +1634,7 @@ def run_next_task(tenant_slug: str):
                 """,
                 (
                     tenant["id"],
-                    f"Potential skill improvement from {task[1]}",
+                    f"Potential skill improvement from {execution_package['task']['title']}",
                     "Review whether this run suggests an update to the active skill.",
                     task_id,
                     agent_run[0],
@@ -1322,6 +1653,61 @@ def run_next_task(tenant_slug: str):
 
     emit_event(
         tenant["id"],
+        "ExecutionPlanned",
+        "task",
+        task_id,
+        {
+            "agent_run_id": str(agent_run[0]),
+            "capability_id": execution_package["capability"]["id"],
+            "worker_id": execution_package["worker"]["id"],
+            "model": execution_package["model"],
+        }
+    )
+    emit_event(
+        tenant["id"],
+        "CapabilityResolved",
+        "capability",
+        execution_package["capability"]["id"],
+        {
+            "task_id": str(task_id),
+            "slug": execution_package["capability"]["slug"],
+        }
+    )
+    emit_event(
+        tenant["id"],
+        "WorkerResolved",
+        "worker",
+        execution_package["worker"]["id"],
+        {
+            "task_id": str(task_id),
+            "capability_id": execution_package["capability"]["id"],
+            "channel": execution_package["worker"]["channel"],
+        }
+    )
+    emit_event(
+        tenant["id"],
+        "ModelResolved",
+        "model_route",
+        execution_package["model"]["id"],
+        {
+            "task_id": str(task_id),
+            "provider": execution_package["model"]["provider"],
+            "model_name": execution_package["model"]["model_name"],
+        }
+    )
+    emit_event(
+        tenant["id"],
+        "PermissionsResolved",
+        "task",
+        task_id,
+        {
+            "agent_run_id": str(agent_run[0]),
+            "permissions": execution_package["permissions"],
+            "tools": execution_package["tools"],
+        }
+    )
+    emit_event(
+        tenant["id"],
         "MemoryResolved",
         "task",
         task_id,
@@ -1333,11 +1719,11 @@ def run_next_task(tenant_slug: str):
     emit_event(
         tenant["id"],
         "SkillsResolved",
-        "agent_template",
-        agent_template["id"],
+        "capability",
+        execution_package["capability"]["id"],
         {
             "task_id": str(task_id),
-            "agent_template_id": str(agent_template["id"]),
+            "capability_id": execution_package["capability"]["id"],
             "skills": [
                 {
                     "skill_id": skill["skill_id"],
@@ -1354,7 +1740,11 @@ def run_next_task(tenant_slug: str):
         "AgentRunStarted",
         "agent_run",
         agent_run[0],
-        {"task_id": str(task_id), "agent_template_id": str(agent_template["id"])}
+        {
+            "task_id": str(task_id),
+            "capability_id": execution_package["capability"]["id"],
+            "worker_id": execution_package["worker"]["id"],
+        }
     )
     emit_event(
         tenant["id"],

@@ -191,3 +191,100 @@ CREATE TABLE IF NOT EXISTS improvement_candidates (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   reviewed_at TIMESTAMPTZ
 );
+
+CREATE TABLE IF NOT EXISTS capabilities (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  slug TEXT UNIQUE NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT,
+  default_model_tier TEXT DEFAULT 'standard',
+  approval_required BOOLEAN DEFAULT true,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS capability_workers (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  capability_id UUID REFERENCES capabilities(id),
+  worker_id UUID REFERENCES worker_registry(id),
+  channel TEXT,
+  priority INT DEFAULT 100,
+  status TEXT DEFAULT 'active',
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(capability_id, worker_id, channel)
+);
+
+CREATE TABLE IF NOT EXISTS capability_skills (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  capability_id UUID REFERENCES capabilities(id),
+  skill_id UUID REFERENCES skills(id),
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(capability_id, skill_id)
+);
+
+CREATE TABLE IF NOT EXISTS model_routes (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  task_type TEXT NOT NULL,
+  sensitivity TEXT NOT NULL DEFAULT 'internal',
+  cost_tier TEXT NOT NULL DEFAULT 'low',
+  quality_tier TEXT NOT NULL DEFAULT 'standard',
+  provider TEXT NOT NULL,
+  model_name TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+INSERT INTO capabilities (
+  slug,
+  name,
+  description,
+  default_model_tier,
+  approval_required
+)
+VALUES (
+  'performance_analysis',
+  'Performance Analysis',
+  'Analyse marketing performance data and generate recommendations.',
+  'standard',
+  true
+)
+ON CONFLICT (slug) DO NOTHING;
+
+INSERT INTO capability_workers (capability_id, worker_id, channel)
+SELECT c.id, w.id, 'google_ads'
+FROM capabilities c
+JOIN worker_registry w ON w.name = 'mock-performance-worker'
+WHERE c.slug = 'performance_analysis'
+ON CONFLICT (capability_id, worker_id, channel) DO NOTHING;
+
+INSERT INTO capability_skills (capability_id, skill_id)
+SELECT c.id, s.id
+FROM capabilities c
+JOIN skills s ON s.slug = 'google-ads-performance-analysis'
+WHERE c.slug = 'performance_analysis'
+ON CONFLICT (capability_id, skill_id) DO NOTHING;
+
+INSERT INTO model_routes (
+  task_type,
+  sensitivity,
+  cost_tier,
+  quality_tier,
+  provider,
+  model_name
+)
+SELECT
+  'performance_analysis',
+  'internal',
+  'low',
+  'standard',
+  'mock',
+  'mock-model-v0'
+WHERE NOT EXISTS (
+  SELECT 1
+  FROM model_routes
+  WHERE task_type = 'performance_analysis'
+    AND sensitivity = 'internal'
+    AND cost_tier = 'low'
+    AND quality_tier = 'standard'
+    AND provider = 'mock'
+    AND model_name = 'mock-model-v0'
+);
