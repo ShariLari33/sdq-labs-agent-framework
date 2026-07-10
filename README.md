@@ -1,5 +1,17 @@
 # SDQ Labs Agent Framework
 
+## Control plane
+
+This repo can run the official Paperclip control plane locally next to the SDQ API. Paperclip is kept separate from SDQ internals: its source is cloned into `.local/platform/paperclip-source`, its secrets live in `platform/paperclip/.env`, and it runs with its own Postgres database.
+
+Start it after the SDQ API stack is running:
+
+```bash
+make paperclip-start
+```
+
+Then open `http://localhost:3100` and create the first admin account. See `platform/paperclip/README.md` for details, verification, logs, and stop commands.
+
 ## Docker acceptance checks
 
 Start the stack:
