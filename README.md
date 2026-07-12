@@ -1,5 +1,21 @@
 # SDQ Labs Agent Framework
 
+## Recovery Philosophy
+
+Git is the source of truth for code, configuration templates, scripts, agent instructions, and skills. Git is not the source of truth for secrets, database contents, Docker volumes, or runtime state.
+
+For a fresh local setup:
+
+```bash
+git clone https://github.com/ShariLari33/sdq-labs-agent-framework.git
+cd sdq-labs-agent-framework
+cp .env.example .env
+make bootstrap-local
+make verify-local
+```
+
+See `recovery/README.md` for full recovery, backup, and disaster procedures. Oracle Cloud will become the device-independent runtime after production deployment is implemented.
+
 ## Control plane
 
 This repo can run the official Paperclip control plane locally next to the SDQ API. Paperclip is kept separate from SDQ internals: its source is cloned into `.local/platform/paperclip-source`, its secrets live in `platform/paperclip/.env`, and it runs with its own Postgres database.

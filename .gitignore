@@ -11,3 +11,14 @@ build/
 *.log
 data/
 tmp/
+backups/
+recovery/backups/
+*.dump
+*.sql
+*.sql.gz
+*.tar
+*.tar.gz
+*.pem
+*.key
+id_rsa
+id_ed25519
