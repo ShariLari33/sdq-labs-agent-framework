@@ -18,3 +18,9 @@
 | `PAPERCLIP_POSTGRES_DB` | Paperclip DB | DB name | no | yes |
 | `DOMAIN_NAME` | reverse proxy | production hostname | no | future |
 | `ACME_EMAIL` | reverse proxy | TLS registration email | no | future |
+| `GOOGLE_API_KEY` | Hermes providers | optional Gemini/Google provider key | yes | optional |
+| `OPENROUTER_API_KEY` | Hermes providers | optional OpenRouter provider key | yes | optional |
+| `API_SERVER_KEY` | Hermes Gateway | bearer token for Hermes API server | yes | yes for gateway |
+| `HERMES_GATEWAY_PORT` | Hermes Gateway | localhost port mapping | no | local |
+| `HERMES_VERSION` | Hermes Gateway | installed hermes-agent package version | no | local/build |
+| `PAPERCLIP_API_URL` | Hermes Gateway | Paperclip API URL reachable from gateway | no | optional |

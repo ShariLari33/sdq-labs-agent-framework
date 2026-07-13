@@ -1,6 +1,7 @@
 .env
 .env.local
 platform/paperclip/.env
+runtime/hermes/gateway/.env
 .local/
 node_modules/
 __pycache__/

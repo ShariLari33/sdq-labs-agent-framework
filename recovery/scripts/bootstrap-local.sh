@@ -58,6 +58,6 @@ make hermes-install
 echo "Local bootstrap complete."
 echo "Next manual actions:"
 echo "- Open http://localhost:3100 and finish/create Paperclip admin if needed."
-echo "- Configure a hermes_local agent with command: $REPO_ROOT/.local/hermes/venv/bin/hermes"
+echo "- Configure a hermes_local agent with command: $REPO_ROOT/runtime/hermes/hermes-local.sh"
 echo "- Use working directory: $REPO_ROOT/runtime/hermes/google-ads-agent/workspace"
 echo "- Run: make verify-local"

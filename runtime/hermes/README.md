@@ -37,12 +37,32 @@ Later, SDQ tools can be exposed as MCP tools with tighter contracts:
 make hermes-install
 ```
 
-This creates `.local/hermes/venv` and installs `hermes-agent`. It does not configure provider API keys and does not overwrite existing Hermes config.
+This creates:
+
+- `.local/hermes/venv`
+- `.local/hermes/state`
+- `.local/hermes/config`
+
+It installs the official `hermes-agent` package into the repository-local virtual environment. It does not configure provider API keys and does not overwrite existing user Hermes config in `~/.hermes`.
+
+Preferred Paperclip command:
+
+```text
+/Users/sharifsediqui/Developer/sdq-labs-agent-framework/runtime/hermes/hermes-local.sh
+```
+
+Direct Hermes executable:
+
+```text
+/Users/sharifsediqui/Developer/sdq-labs-agent-framework/.local/hermes/venv/bin/hermes
+```
 
 ## Verify
 
 ```bash
 make hermes-verify
+make hermes-path
+make hermes-version
 make hermes-test-sdq TENANT=demo-partner-a
 ```
 

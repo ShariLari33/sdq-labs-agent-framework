@@ -29,6 +29,7 @@ Oracle production deployment is planned, not fully implemented. `bootstrap-oracl
 - startup service configuration
 - off-server backup upload
 - monitoring and alerts
+- Oracle Hermes installation path and service account policy
 
 ## Fresh Oracle Steps
 
@@ -57,3 +58,11 @@ make verify-oracle
 ```
 
 Today these commands will report missing production Compose until that deployment file is implemented.
+
+Hermes on Oracle should use the same Dockerized gateway architecture used locally:
+
+```text
+Paperclip container -> Hermes Gateway container -> SDQ API container
+```
+
+Only domains, HTTPS, production secrets, and persistent production volumes should differ. The gateway should remain private to the Docker network or a private overlay network; do not expose port `8642` publicly.

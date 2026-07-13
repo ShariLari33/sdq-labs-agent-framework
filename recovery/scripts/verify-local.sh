@@ -24,6 +24,7 @@ check "Paperclip health" curl --fail --silent --show-error --max-time 5 http://l
 check "SDQ postgres container" docker inspect sdq-postgres
 check "Paperclip postgres container" docker inspect sdq-paperclip-db-1
 check "Hermes executable" test -x "$REPO_ROOT/.local/hermes/venv/bin/hermes"
+check "Hermes wrapper" test -x "$REPO_ROOT/runtime/hermes/hermes-local.sh"
 check "AGENTS.md exists" test -f "$REPO_ROOT/runtime/hermes/google-ads-agent/AGENTS.md"
 check "SKILL.md exists" test -f "$REPO_ROOT/runtime/hermes/google-ads-agent/skills/google-ads-performance-analysis/SKILL.md"
 

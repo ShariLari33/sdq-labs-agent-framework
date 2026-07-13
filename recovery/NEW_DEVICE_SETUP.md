@@ -32,6 +32,8 @@ cd sdq-labs-agent-framework
 cp .env.example .env
 make bootstrap-local
 make verify-local
+make hermes-gateway-start
+make hermes-gateway-verify
 ```
 
 `make bootstrap-local` is safe to rerun. It starts SDQ services, starts Paperclip through the existing Paperclip scripts, and installs Hermes into `.local/hermes/venv`.
@@ -40,9 +42,10 @@ make verify-local
 
 - Open `http://localhost:3100`.
 - Create or log into the Paperclip admin account.
-- Configure the `hermes_local` agent manually where Paperclip API automation is unavailable.
-- Use command: `.local/hermes/venv/bin/hermes`.
-- Use working directory: `runtime/hermes/google-ads-agent/workspace`.
+- Configure the Hermes agent manually where Paperclip API automation is unavailable.
+- Prefer adapter `hermes_gateway` for Dockerized Paperclip.
+- Use API base URL: `http://hermes-gateway:8642`.
+- Use API key from `runtime/hermes/gateway/.env`.
 - Store provider/API credentials in a password manager, not in Git.
 
 ## Do Not Commit

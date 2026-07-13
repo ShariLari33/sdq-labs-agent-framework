@@ -1,4 +1,4 @@
-.PHONY: paperclip-clone paperclip-start paperclip-stop paperclip-logs paperclip-status hermes-install hermes-verify hermes-test-sdq bootstrap-local verify-local bootstrap-oracle verify-oracle backup restore diagnostics recovery-check
+.PHONY: paperclip-clone paperclip-start paperclip-stop paperclip-logs paperclip-status hermes-install hermes-verify hermes-test-sdq hermes-path hermes-version hermes-gateway-build hermes-gateway-start hermes-gateway-stop hermes-gateway-logs hermes-gateway-health hermes-gateway-verify bootstrap-local verify-local bootstrap-oracle verify-oracle backup restore diagnostics recovery-check
 
 paperclip-clone:
 	./platform/paperclip/scripts/clone-or-update.sh
@@ -23,6 +23,30 @@ hermes-verify:
 
 hermes-test-sdq:
 	./runtime/hermes/google-ads-agent/scripts/test-performance-summary.sh $(TENANT)
+
+hermes-path:
+	@printf '%s\n' "$(CURDIR)/runtime/hermes/hermes-local.sh"
+
+hermes-version:
+	./runtime/hermes/hermes-local.sh --version
+
+hermes-gateway-build:
+	./runtime/hermes/gateway/scripts/build.sh
+
+hermes-gateway-start:
+	./runtime/hermes/gateway/scripts/start.sh
+
+hermes-gateway-stop:
+	./runtime/hermes/gateway/scripts/stop.sh
+
+hermes-gateway-logs:
+	./runtime/hermes/gateway/scripts/logs.sh
+
+hermes-gateway-health:
+	./runtime/hermes/gateway/scripts/health.sh
+
+hermes-gateway-verify:
+	./runtime/hermes/gateway/scripts/verify.sh
 
 bootstrap-local:
 	./recovery/scripts/bootstrap-local.sh

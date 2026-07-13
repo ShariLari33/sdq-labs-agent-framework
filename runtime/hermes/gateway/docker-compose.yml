@@ -1,0 +1,48 @@
+name: sdq-hermes-gateway
+
+services:
+  hermes-gateway:
+    build:
+      context: ../../..
+      dockerfile: runtime/hermes/gateway/Dockerfile
+      args:
+        HERMES_VERSION: ${HERMES_VERSION:-0.18.2}
+    container_name: sdq-hermes-gateway
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      API_SERVER_ENABLED: "true"
+      API_SERVER_HOST: "0.0.0.0"
+      API_SERVER_PORT: "8642"
+      HERMES_HOME: /home/hermes/.hermes
+      PAPERCLIP_API_URL: ${PAPERCLIP_API_URL:-http://server:3100/api}
+      PAPERCLIP_API_KEY: ${PAPERCLIP_API_KEY:-}
+      SDQ_API_BASE_URL: ${SDQ_API_BASE_URL:-http://api:8000}
+      NO_COLOR: "1"
+    ports:
+      - "127.0.0.1:${HERMES_GATEWAY_PORT:-8642}:8642"
+    volumes:
+      - sdq_hermes_gateway_state:/home/hermes/.hermes
+      - ../google-ads-agent/workspace:/home/hermes/workspace:rw
+      - ../google-ads-agent/AGENTS.md:/home/hermes/AGENTS.md:ro
+      - ../google-ads-agent/skills:/home/hermes/skills:ro
+      - ../google-ads-agent/scripts:/home/hermes/scripts:ro
+    networks:
+      sdq:
+        aliases:
+          - hermes-gateway
+      paperclip:
+        aliases:
+          - hermes-gateway
+
+volumes:
+  sdq_hermes_gateway_state:
+
+networks:
+  sdq:
+    external: true
+    name: sdq-labs-agent-framework_default
+  paperclip:
+    external: true
+    name: sdq-paperclip_default
