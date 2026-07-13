@@ -40,6 +40,7 @@ from packages.performance.repository import (
     get_import_by_id,
     get_imports_for_tenant,
 )
+from packages.safety import SafetyError, assert_safe_startup
 from packages.tools.google_ads_performance_reader import read_google_ads_performance
 
 app = FastAPI(title="SDQ Labs Agent Framework API")
@@ -49,6 +50,14 @@ DATABASE_URL = os.getenv(
     "DATABASE_URL",
     "postgresql://sdq:sdq_dev_password@postgres:5432/sdq_agents"
 )
+
+
+@app.on_event("startup")
+def validate_runtime_safety():
+    try:
+        assert_safe_startup()
+    except SafetyError as exc:
+        raise RuntimeError(str(exc)) from exc
 
 class TaskCreate(BaseModel):
     tenant_slug: str

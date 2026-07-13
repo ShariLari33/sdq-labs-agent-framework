@@ -10,6 +10,8 @@ fail() {
   exit 1
 }
 
+[[ "${SDQ_ENVIRONMENT:-development}" == "sandbox" ]] || fail "SDQ_ENVIRONMENT=sandbox is required for synthetic imports"
+[[ "${SDQ_ALLOW_SYNTHETIC_DATA:-false}" == "true" ]] || fail "SDQ_ALLOW_SYNTHETIC_DATA=true is required for synthetic imports"
 "${ROOT_DIR}/scripts/bootstrap.sh" >/dev/null
 code="$(curl -sS -o /tmp/sdq-growth-baseline-import.json -w "%{http_code}" \
   -X POST "${API_BASE_URL}/performance-data/${TENANT_SLUG}/google-ads/import" \
@@ -24,4 +26,3 @@ else
   cat /tmp/sdq-growth-baseline-import.json >&2
   fail "baseline import failed with HTTP ${code}"
 fi
-

@@ -14,6 +14,19 @@ fail() {
   exit 1
 }
 
+require_sandbox_automation() {
+  [[ "${SDQ_ENVIRONMENT:-development}" == "sandbox" ]] \
+    || fail "SDQ_ENVIRONMENT=sandbox is required for sandbox automation"
+  [[ "${SDQ_ALLOW_AUTO_APPROVALS:-false}" == "true" ]] \
+    || fail "SDQ_ALLOW_AUTO_APPROVALS=true is required for sandbox automatic approvals"
+  [[ "${SDQ_ALLOW_AUTO_EVOLUTION:-false}" == "true" ]] \
+    || fail "SDQ_ALLOW_AUTO_EVOLUTION=true is required for sandbox automatic evolution"
+  [[ "${SDQ_ALLOW_SYNTHETIC_DATA:-false}" == "true" ]] \
+    || fail "SDQ_ALLOW_SYNTHETIC_DATA=true is required for synthetic sandbox data"
+  [[ "${TENANT_SLUG}" == "sdq-labs-growth-sandbox" ]] \
+    || fail "sandbox automation is only allowed for sdq-labs-growth-sandbox"
+}
+
 json_post() {
   local url="$1"
   local payload="$2"
@@ -64,6 +77,7 @@ run_period() {
 
 command -v curl >/dev/null || fail "curl is required"
 command -v jq >/dev/null || fail "jq is required"
+require_sandbox_automation
 wait_for_api || fail "SDQ API is unavailable at ${API_BASE_URL}"
 
 "${ROOT_DIR}/scripts/bootstrap.sh" >/dev/null

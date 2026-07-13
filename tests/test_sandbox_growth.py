@@ -118,6 +118,13 @@ class GrowthSandboxDatasetTests(unittest.TestCase):
             with self.subTest(script=script_path.name):
                 subprocess.run(["bash", "-n", str(script_path)], check=True)
 
+    def test_sandbox_scripts_require_explicit_safety_flags(self):
+        run_script = (SANDBOX_ROOT / "scripts" / "run-demo-flow.sh").read_text()
+        self.assertIn("SDQ_ENVIRONMENT=sandbox", run_script)
+        self.assertIn("SDQ_ALLOW_AUTO_APPROVALS=true", run_script)
+        self.assertIn("SDQ_ALLOW_AUTO_EVOLUTION=true", run_script)
+        self.assertIn("SDQ_ALLOW_SYNTHETIC_DATA=true", run_script)
+
 
 def campaign(summary, name):
     for item in summary["campaign_breakdown"]:

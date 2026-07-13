@@ -71,13 +71,13 @@ docker compose up -d --build
 Bootstrap the sandbox tenant and import baseline data:
 
 ```bash
-sandbox/sdq-labs-growth/scripts/load-baseline.sh
+SDQ_ENVIRONMENT=sandbox SDQ_ALLOW_SYNTHETIC_DATA=true sandbox/sdq-labs-growth/scripts/load-baseline.sh
 ```
 
 Run the full repeatable demo flow:
 
 ```bash
-sandbox/sdq-labs-growth/scripts/run-demo-flow.sh
+make sandbox
 ```
 
 Verify the current demo state:

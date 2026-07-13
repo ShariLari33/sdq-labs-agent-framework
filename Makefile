@@ -1,4 +1,4 @@
-.PHONY: paperclip-clone paperclip-start paperclip-stop paperclip-logs paperclip-status hermes-install hermes-verify hermes-test-sdq hermes-path hermes-version hermes-gateway-build hermes-gateway-start hermes-gateway-stop hermes-gateway-logs hermes-gateway-health hermes-gateway-verify sandbox bootstrap-local verify-local bootstrap-oracle verify-oracle backup restore diagnostics recovery-check
+.PHONY: paperclip-clone paperclip-start paperclip-stop paperclip-logs paperclip-status hermes-install hermes-verify hermes-test-sdq hermes-path hermes-version hermes-gateway-build hermes-gateway-start hermes-gateway-stop hermes-gateway-logs hermes-gateway-health hermes-gateway-verify sandbox paperclip-sandbox-bootstrap paperclip-sandbox-verify sandbox-full bootstrap-local verify-local bootstrap-oracle verify-oracle backup restore diagnostics recovery-check
 
 paperclip-clone:
 	./platform/paperclip/scripts/clone-or-update.sh
@@ -50,7 +50,17 @@ hermes-gateway-verify:
 
 sandbox:
 	docker compose up -d --build
-	./sandbox/sdq-labs-growth/scripts/run-demo-flow.sh
+	SDQ_ENVIRONMENT=sandbox SDQ_ALLOW_AUTO_APPROVALS=true SDQ_ALLOW_AUTO_EVOLUTION=true SDQ_ALLOW_SYNTHETIC_DATA=true ./sandbox/sdq-labs-growth/scripts/run-demo-flow.sh
+
+paperclip-sandbox-bootstrap:
+	./sandbox/sdq-labs-growth/scripts/bootstrap-paperclip.sh
+
+paperclip-sandbox-verify:
+	./sandbox/sdq-labs-growth/scripts/verify-paperclip-flow.sh
+
+sandbox-full: sandbox
+	./sandbox/sdq-labs-growth/scripts/bootstrap-paperclip.sh
+	./sandbox/sdq-labs-growth/scripts/verify-paperclip-flow.sh
 
 bootstrap-local:
 	./recovery/scripts/bootstrap-local.sh
