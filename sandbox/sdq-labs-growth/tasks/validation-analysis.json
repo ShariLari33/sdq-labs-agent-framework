@@ -1,0 +1,13 @@
+{
+  "tenant_slug": "sdq-labs-growth-sandbox",
+  "title": "Validation Google Ads performance analysis",
+  "input": {
+    "channel": "google_ads",
+    "task_type": "performance_analysis",
+    "date_from": "2026-07-01",
+    "date_to": "2026-07-07",
+    "objective": "qualified_demo_requests",
+    "currency": "EUR",
+    "context": "Synthetic validation period to confirm improvement persistence."
+  }
+}

@@ -1,4 +1,4 @@
-.PHONY: paperclip-clone paperclip-start paperclip-stop paperclip-logs paperclip-status hermes-install hermes-verify hermes-test-sdq hermes-path hermes-version hermes-gateway-build hermes-gateway-start hermes-gateway-stop hermes-gateway-logs hermes-gateway-health hermes-gateway-verify bootstrap-local verify-local bootstrap-oracle verify-oracle backup restore diagnostics recovery-check
+.PHONY: paperclip-clone paperclip-start paperclip-stop paperclip-logs paperclip-status hermes-install hermes-verify hermes-test-sdq hermes-path hermes-version hermes-gateway-build hermes-gateway-start hermes-gateway-stop hermes-gateway-logs hermes-gateway-health hermes-gateway-verify sandbox bootstrap-local verify-local bootstrap-oracle verify-oracle backup restore diagnostics recovery-check
 
 paperclip-clone:
 	./platform/paperclip/scripts/clone-or-update.sh
@@ -47,6 +47,10 @@ hermes-gateway-health:
 
 hermes-gateway-verify:
 	./runtime/hermes/gateway/scripts/verify.sh
+
+sandbox:
+	docker compose up -d --build
+	./sandbox/sdq-labs-growth/scripts/run-demo-flow.sh
 
 bootstrap-local:
 	./recovery/scripts/bootstrap-local.sh

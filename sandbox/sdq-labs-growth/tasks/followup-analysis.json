@@ -1,0 +1,13 @@
+{
+  "tenant_slug": "sdq-labs-growth-sandbox",
+  "title": "Follow-up Google Ads performance analysis",
+  "input": {
+    "channel": "google_ads",
+    "task_type": "performance_analysis",
+    "date_from": "2026-06-15",
+    "date_to": "2026-06-21",
+    "objective": "qualified_demo_requests",
+    "currency": "EUR",
+    "context": "Synthetic follow-up period after broad campaign budget control and non brand search-term cleanup."
+  }
+}

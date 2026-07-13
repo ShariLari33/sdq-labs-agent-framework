@@ -126,6 +126,12 @@ class EvolutionProposalReview(BaseModel):
     comment: str
 
 
+SANDBOX_TENANT = {
+    "name": "SDQ Labs Growth Sandbox",
+    "slug": "sdq-labs-growth-sandbox",
+}
+
+
 def get_db_connection():
     return psycopg.connect(DATABASE_URL)
 
@@ -842,6 +848,33 @@ def get_tenants():
             }
             for row in rows
         ]
+    }
+
+
+@app.post("/sandbox/sdq-labs-growth/bootstrap-tenant")
+def bootstrap_sdq_labs_growth_sandbox_tenant():
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO tenants (name, slug)
+                VALUES (%s, %s)
+                ON CONFLICT (slug) DO UPDATE
+                SET name = EXCLUDED.name
+                RETURNING id, name, slug, created_at
+                """,
+                (SANDBOX_TENANT["name"], SANDBOX_TENANT["slug"]),
+            )
+            tenant = cur.fetchone()
+            conn.commit()
+
+    return {
+        "tenant": {
+            "id": str(tenant[0]),
+            "name": tenant[1],
+            "slug": tenant[2],
+            "created_at": tenant[3].isoformat(),
+        }
     }
 
 

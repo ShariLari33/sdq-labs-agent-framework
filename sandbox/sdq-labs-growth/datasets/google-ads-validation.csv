@@ -1,0 +1,43 @@
+date,campaign_id,campaign_name,campaign_status,campaign_type,ad_group_id,ad_group_name,impressions,clicks,cost,conversions,conversion_value,currency
+2026-07-01,camp-brand,Brand Search,enabled,Search,ag-brand-exact,Brand exact,810,98,147.00,7.4,4440,EUR
+2026-07-01,camp-brand,Brand Search,enabled,Search,ag-brand-service,Service brand terms,515,47,79.00,3,1800,EUR
+2026-07-01,camp-nonbrand,AI Automation Non Brand,enabled,Search,ag-automation-sme,AI automation SME,2150,82,344.00,5.7,3990,EUR
+2026-07-01,camp-nonbrand,AI Automation Non Brand,enabled,Search,ag-agent-services,Agent services,1750,69,276.00,3.8,2660,EUR
+2026-07-01,camp-broad,Broad Growth Experiments,enabled,Search,ag-broad-ai,Broad AI tools,1900,19,150.00,0.3,150,EUR
+2026-07-01,camp-broad,Broad Growth Experiments,enabled,Search,ag-broad-growth,Broad growth,1650,15,110.00,0.2,100,EUR
+2026-07-02,camp-brand,Brand Search,enabled,Search,ag-brand-exact,Brand exact,810,98,147.00,7.4,4440,EUR
+2026-07-02,camp-brand,Brand Search,enabled,Search,ag-brand-service,Service brand terms,515,47,79.00,3,1800,EUR
+2026-07-02,camp-nonbrand,AI Automation Non Brand,enabled,Search,ag-automation-sme,AI automation SME,2150,82,344.00,5.7,3990,EUR
+2026-07-02,camp-nonbrand,AI Automation Non Brand,enabled,Search,ag-agent-services,Agent services,1750,69,276.00,3.8,2660,EUR
+2026-07-02,camp-broad,Broad Growth Experiments,enabled,Search,ag-broad-ai,Broad AI tools,1900,19,150.00,0.3,150,EUR
+2026-07-02,camp-broad,Broad Growth Experiments,enabled,Search,ag-broad-growth,Broad growth,1650,15,110.00,0.2,100,EUR
+2026-07-03,camp-brand,Brand Search,enabled,Search,ag-brand-exact,Brand exact,810,98,147.00,7.4,4440,EUR
+2026-07-03,camp-brand,Brand Search,enabled,Search,ag-brand-service,Service brand terms,515,47,79.00,3,1800,EUR
+2026-07-03,camp-nonbrand,AI Automation Non Brand,enabled,Search,ag-automation-sme,AI automation SME,2150,82,344.00,5.7,3990,EUR
+2026-07-03,camp-nonbrand,AI Automation Non Brand,enabled,Search,ag-agent-services,Agent services,1750,69,276.00,3.8,2660,EUR
+2026-07-03,camp-broad,Broad Growth Experiments,enabled,Search,ag-broad-ai,Broad AI tools,1900,19,150.00,0.3,150,EUR
+2026-07-03,camp-broad,Broad Growth Experiments,enabled,Search,ag-broad-growth,Broad growth,1650,15,110.00,0.2,100,EUR
+2026-07-04,camp-brand,Brand Search,enabled,Search,ag-brand-exact,Brand exact,810,98,147.00,7.4,4440,EUR
+2026-07-04,camp-brand,Brand Search,enabled,Search,ag-brand-service,Service brand terms,515,47,79.00,3,1800,EUR
+2026-07-04,camp-nonbrand,AI Automation Non Brand,enabled,Search,ag-automation-sme,AI automation SME,2150,82,344.00,5.7,3990,EUR
+2026-07-04,camp-nonbrand,AI Automation Non Brand,enabled,Search,ag-agent-services,Agent services,1750,69,276.00,3.8,2660,EUR
+2026-07-04,camp-broad,Broad Growth Experiments,enabled,Search,ag-broad-ai,Broad AI tools,1900,19,150.00,0.3,150,EUR
+2026-07-04,camp-broad,Broad Growth Experiments,enabled,Search,ag-broad-growth,Broad growth,1650,15,110.00,0.2,100,EUR
+2026-07-05,camp-brand,Brand Search,enabled,Search,ag-brand-exact,Brand exact,810,98,147.00,7.4,4440,EUR
+2026-07-05,camp-brand,Brand Search,enabled,Search,ag-brand-service,Service brand terms,515,47,79.00,3,1800,EUR
+2026-07-05,camp-nonbrand,AI Automation Non Brand,enabled,Search,ag-automation-sme,AI automation SME,2150,82,344.00,5.7,3990,EUR
+2026-07-05,camp-nonbrand,AI Automation Non Brand,enabled,Search,ag-agent-services,Agent services,1750,69,276.00,3.8,2660,EUR
+2026-07-05,camp-broad,Broad Growth Experiments,enabled,Search,ag-broad-ai,Broad AI tools,1900,19,150.00,0.3,150,EUR
+2026-07-05,camp-broad,Broad Growth Experiments,enabled,Search,ag-broad-growth,Broad growth,1650,15,110.00,0.2,100,EUR
+2026-07-06,camp-brand,Brand Search,enabled,Search,ag-brand-exact,Brand exact,810,98,147.00,7.4,4440,EUR
+2026-07-06,camp-brand,Brand Search,enabled,Search,ag-brand-service,Service brand terms,515,47,79.00,3,1800,EUR
+2026-07-06,camp-nonbrand,AI Automation Non Brand,enabled,Search,ag-automation-sme,AI automation SME,2150,82,344.00,5.7,3990,EUR
+2026-07-06,camp-nonbrand,AI Automation Non Brand,enabled,Search,ag-agent-services,Agent services,1750,69,276.00,3.8,2660,EUR
+2026-07-06,camp-broad,Broad Growth Experiments,enabled,Search,ag-broad-ai,Broad AI tools,1900,19,150.00,0.3,150,EUR
+2026-07-06,camp-broad,Broad Growth Experiments,enabled,Search,ag-broad-growth,Broad growth,1650,15,110.00,0.2,100,EUR
+2026-07-07,camp-brand,Brand Search,enabled,Search,ag-brand-exact,Brand exact,810,98,147.00,7.4,4440,EUR
+2026-07-07,camp-brand,Brand Search,enabled,Search,ag-brand-service,Service brand terms,515,47,79.00,3,1800,EUR
+2026-07-07,camp-nonbrand,AI Automation Non Brand,enabled,Search,ag-automation-sme,AI automation SME,2150,82,344.00,5.7,3990,EUR
+2026-07-07,camp-nonbrand,AI Automation Non Brand,enabled,Search,ag-agent-services,Agent services,1750,69,276.00,3.8,2660,EUR
+2026-07-07,camp-broad,Broad Growth Experiments,enabled,Search,ag-broad-ai,Broad AI tools,1900,19,150.00,0.3,150,EUR
+2026-07-07,camp-broad,Broad Growth Experiments,enabled,Search,ag-broad-growth,Broad growth,1650,15,110.00,0.2,100,EUR

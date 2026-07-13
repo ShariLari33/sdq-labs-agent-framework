@@ -55,3 +55,41 @@ curl -s http://localhost:8000/events/demo-partner-a
 ```
 
 To test OpenAI execution, set `OPENAI_API_KEY`, set `OPENAI_MODEL`, update a model route through the development endpoint, then run the same task flow. Do not put API keys in task payloads.
+
+## Synthetic Growth Sandbox
+
+The repo includes a complete fictional sandbox company at `sandbox/sdq-labs-growth/` for end-to-end testing before a real company or live advertising account exists.
+
+Warning: all sandbox company details and Google Ads rows are synthetic. Never use real ad credentials with these scripts.
+
+Start the local stack:
+
+```bash
+docker compose up -d --build
+```
+
+Bootstrap the sandbox tenant and import baseline data:
+
+```bash
+sandbox/sdq-labs-growth/scripts/load-baseline.sh
+```
+
+Run the full repeatable demo flow:
+
+```bash
+sandbox/sdq-labs-growth/scripts/run-demo-flow.sh
+```
+
+Verify the current demo state:
+
+```bash
+sandbox/sdq-labs-growth/scripts/verify-demo-flow.sh
+```
+
+Reset only the sandbox tenant's imported data, tasks, runs, approvals, memory, learnings, improvement candidates, events, and feedback:
+
+```bash
+sandbox/sdq-labs-growth/scripts/reset-sandbox-data.sh
+```
+
+The demo uses tenant slug `sdq-labs-growth-sandbox` and synthetic Google Ads periods for baseline, follow-up, and validation analysis.
